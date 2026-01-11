@@ -70,39 +70,187 @@ class CacheManager:
     def __init__(self, cache_dir: str = ".cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        self._init_cache_cleanup()
+    
+    def _init_cache_cleanup(self):
+        """初始化缓存清理机制"""
+        # 创建缓存统计文件
+        self.stats_file = self.cache_dir / "cache_stats.json"
+        if not self.stats_file.exists():
+            self._save_stats({
+                'total_requests': 0,
+                'cache_hits': 0,
+                'cache_misses': 0,
+                'total_size_kb': 0,
+                'last_cleanup': datetime.now().isoformat()
+            })
     
     def _get_cache_key(self, func_name: str, *args, **kwargs) -> str:
         """生成缓存键"""
-        key_data = f"{func_name}:{args}:{kwargs}"
+        # 简化参数，避免过长的缓存键
+        args_str = str(args)[:100]  # 限制长度
+        kwargs_str = str(sorted(kwargs.items()))[:100]
+        key_data = f"{func_name}:{args_str}:{kwargs_str}"
         return hashlib.md5(key_data.encode()).hexdigest()
     
     def get(self, key: str, ttl: int = 3600) -> Optional[Any]:
         """获取缓存"""
         cache_file = self.cache_dir / f"{key}.json"
         
+        # 更新统计
+        stats = self._load_stats()
+        stats['total_requests'] = stats.get('total_requests', 0) + 1
+        
         if cache_file.exists():
             try:
-                with open(cache_file, 'r') as f:
+                with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
                 # 检查是否过期
                 if datetime.now().timestamp() - data['timestamp'] < ttl:
+                    stats['cache_hits'] = stats.get('cache_hits', 0) + 1
+                    self._save_stats(stats)
                     return data['value']
+                else:
+                    # 删除过期缓存
+                    cache_file.unlink(missing_ok=True)
+                    stats['cache_misses'] = stats.get('cache_misses', 0) + 1
+                    self._save_stats(stats)
             except:
-                pass
+                stats['cache_misses'] = stats.get('cache_misses', 0) + 1
+                self._save_stats(stats)
+                return None
+        else:
+            stats['cache_misses'] = stats.get('cache_misses', 0) + 1
+            self._save_stats(stats)
         
         return None
     
-    def set(self, key: str, value: Any):
+    def set(self, key: str, value: Any, compress: bool = True):
         """设置缓存"""
         cache_file = self.cache_dir / f"{key}.json"
         
         try:
-            with open(cache_file, 'w') as f:
-                json.dump({
-                    'timestamp': datetime.now().timestamp(),
-                    'value': value
-                }, f, default=str)
+            # 序列化数据
+            cache_data = {
+                'timestamp': datetime.now().timestamp(),
+                'value': value
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, default=str, separators=(',', ':'))
+            
+            # 更新缓存大小统计
+            self._update_size_stats()
+            
+            # 检查是否需要清理
+            self._check_and_cleanup()
+            
+        except Exception as e:
+            console.print(f"[yellow]⚠️ 缓存写入失败: {e}[/yellow]")
+    
+    def _update_size_stats(self):
+        """更新缓存大小统计"""
+        total_size = 0
+        for cache_file in self.cache_dir.glob("*.json"):
+            total_size += cache_file.stat().st_size
+        
+        stats = self._load_stats()
+        stats['total_size_kb'] = total_size / 1024
+        self._save_stats(stats)
+    
+    def _check_and_cleanup(self, max_size_mb: int = 100):
+        """检查并清理缓存"""
+        stats = self._load_stats()
+        current_size_mb = stats.get('total_size_kb', 0) / 1024
+        
+        if current_size_mb > max_size_mb:
+            console.print(f"[yellow]⚠️ 缓存大小超过 {max_size_mb}MB，正在清理...[/yellow]")
+            self.cleanup_oldest(max_size_mb // 2)
+    
+    def cleanup_oldest(self, target_size_mb: int = 50):
+        """清理最旧的缓存文件"""
+        cache_files = []
+        for cache_file in self.cache_dir.glob("*.json"):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                cache_files.append({
+                    'file': cache_file,
+                    'timestamp': data['timestamp'],
+                    'size': cache_file.stat().st_size
+                })
+            except:
+                continue
+        
+        # 按时间排序（从旧到新）
+        cache_files.sort(key=lambda x: x['timestamp'])
+        
+        current_size_mb = sum(f['size'] for f in cache_files) / (1024 * 1024)
+        deleted_size = 0
+        
+        for cache_info in cache_files:
+            if current_size_mb - deleted_size/(1024*1024) <= target_size_mb:
+                break
+            
+            try:
+                cache_info['file'].unlink()
+                deleted_size += cache_info['size']
+            except:
+                continue
+        
+        if deleted_size > 0:
+            console.print(f"[green]✓ 清理缓存: 删除 {deleted_size/1024:.1f}KB[/green]")
+            self._update_size_stats()
+            
+            stats = self._load_stats()
+            stats['last_cleanup'] = datetime.now().isoformat()
+            self._save_stats(stats)
+    
+    def clear(self):
+        """清空所有缓存"""
+        for cache_file in self.cache_dir.glob("*.json"):
+            try:
+                cache_file.unlink()
+            except:
+                continue
+        
+        stats = self._load_stats()
+        stats.update({
+            'total_size_kb': 0,
+            'last_cleanup': datetime.now().isoformat()
+        })
+        self._save_stats(stats)
+        
+        console.print("[green]✓ 缓存已清空[/green]")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        stats = self._load_stats()
+        
+        # 计算命中率
+        total_requests = stats.get('total_requests', 0)
+        cache_hits = stats.get('cache_hits', 0)
+        hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        stats['hit_rate'] = f"{hit_rate:.1f}%"
+        stats['cache_files_count'] = len(list(self.cache_dir.glob("*.json")))
+        
+        return stats
+    
+    def _load_stats(self) -> Dict[str, Any]:
+        """加载统计信息"""
+        try:
+            with open(self.stats_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    
+    def _save_stats(self, stats: Dict[str, Any]):
+        """保存统计信息"""
+        try:
+            with open(self.stats_file, 'w', encoding='utf-8') as f:
+                json.dump(stats, f, default=str, indent=2)
         except:
             pass
 

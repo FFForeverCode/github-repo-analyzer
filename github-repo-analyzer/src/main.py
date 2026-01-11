@@ -600,6 +600,103 @@ def dashboard(repo_name, output, token):
         console.print(traceback.format_exc())
         sys.exit(1)
 
+@cli.command()
+@click.argument('repo_name')
+@click.option('--days', '-d', default=180, help='分析的时间范围（天数），默认180天')
+@click.option('--max-commits', '-c', default=200, help='最大获取的commit数量，默认200')
+@click.option('--output', '-o', default='output', help='输出目录')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def complexity(repo_name, days, max_commits, output, token):
+    """
+    分析仓库的代码复杂度
+    
+    REPO_NAME: 仓库全名，格式为 owner/repo
+    
+    示例: python main.py complexity facebook/react
+    """
+    print_banner()
+    
+    try:
+        from src.analyzer import CodeComplexityAnalyzer
+        
+        # 初始化客户端
+        client = GitHubClient(token=token)
+        
+        # 执行复杂度分析
+        console.print(f"\n[cyan]正在分析 {repo_name} 的代码复杂度...[/cyan]\n")
+        
+        analyzer = CodeComplexityAnalyzer(client)
+        result = analyzer.analyze_complexity(
+            repo_name=repo_name,
+            max_commits=max_commits
+        )
+        
+        # 打印结果
+        console.print("\n[bold]📊 代码复杂度分析结果[/bold]\n")
+        
+        # 文件变更模式
+        file_patterns = result.get('file_change_patterns', {})
+        console.print(f"[bold cyan]文件变更模式:[/bold cyan]")
+        console.print(f"  总文件变更数: {file_patterns.get('total_file_changes', 0)}")
+        console.print(f"  唯一文件数: {file_patterns.get('total_unique_files', 0)}")
+        console.print(f"  每次提交平均文件数: {file_patterns.get('files_per_commit', 0):.2f}")
+        console.print(f"  变更熵值: {file_patterns.get('change_entropy', 0):.3f}")
+        
+        # 依赖变更
+        dependency = result.get('dependency_changes', {})
+        console.print(f"\n[bold cyan]依赖变更分析:[/bold cyan]")
+        console.print(f"  依赖文件变更次数: {dependency.get('dependency_file_changes', 0)}")
+        console.print(f"  配置文件变更次数: {dependency.get('config_file_changes', 0)}")
+        console.print(f"  依赖变更比率: {dependency.get('dependency_change_ratio', 0)*100:.1f}%")
+        
+        # 重构复杂度
+        refactoring = result.get('refactoring_complexity', {})
+        console.print(f"\n[bold cyan]重构复杂度:[/bold cyan]")
+        console.print(f"  简单重构提交: {refactoring.get('simple_refactoring_commits', 0)}")
+        console.print(f"  复杂重构提交: {refactoring.get('complex_refactoring_commits', 0)}")
+        console.print(f"  总重构提交: {refactoring.get('total_refactoring_commits', 0)}")
+        console.print(f"  重构比率: {refactoring.get('refactoring_ratio', 0)*100:.1f}%")
+        
+        # 架构变更
+        architecture = result.get('architecture_changes', {})
+        console.print(f"\n[bold cyan]架构变更分析:[/bold cyan]")
+        for category, count in architecture.items():
+            if count > 0:
+                console.print(f"  {category}: {count} 次")
+        
+        # 复杂度分数
+        complexity_score = result.get('complexity_score', 0)
+        console.print(f"\n[bold cyan]综合复杂度分数:[/bold cyan] {complexity_score:.1f}/100")
+        
+        # 评估说明
+        if complexity_score < 30:
+            console.print(f"[green]✓ 代码复杂度较低，项目结构相对简单[/green]")
+        elif complexity_score < 60:
+            console.print(f"[yellow]⚠ 代码复杂度适中，建议关注架构变更[/yellow]")
+        else:
+            console.print(f"[red]⚠ 代码复杂度较高，建议进行代码梳理和重构[/red]")
+        
+        # 保存结果
+        output_dir = Path(output)
+        output_dir.mkdir(exist_ok=True)
+        
+        safe_name = repo_name.replace('/', '_')
+        json_path = output_dir / f"{safe_name}_complexity.json"
+        
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(result, f, default=str, indent=2)
+        
+        console.print(f"\n[bold green]✅ 代码复杂度分析完成！[/bold green]")
+        console.print(f"[dim]结果已保存到: {json_path}[/dim]")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 复杂度分析失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
 
 def main():
     """主入口函数"""

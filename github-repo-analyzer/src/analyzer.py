@@ -10,7 +10,6 @@ from collections import defaultdict, Counter
 import statistics
 import re
 import math
-
 import pandas as pd
 import numpy as np
 from rich.console import Console
@@ -53,6 +52,7 @@ class CommitAnalyzer:
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
         ) as progress:
             task = progress.add_task("获取commits...", total=max_commits)
             
@@ -65,6 +65,23 @@ class CommitAnalyzer:
                     # 获取文件变更统计
                     stats = commit.stats
                     
+                    # 分析commit消息类型
+                    message_type = self._classify_commit_message(message)
+                    
+                    # 获取文件变更详情（如果可用）
+                    files_changed = []
+                    try:
+                        for file in commit.files:
+                            files_changed.append({
+                                'filename': file.filename,
+                                'additions': file.additions,
+                                'deletions': file.deletions,
+                                'changes': file.changes,
+                                'status': file.status
+                            })
+                    except:
+                        pass
+                    
                     commits_data.append({
                         'sha': commit.sha[:7],
                         'author': author,
@@ -74,12 +91,17 @@ class CommitAnalyzer:
                         'month': commit_date.month,
                         'year': commit_date.year,
                         'message': message.split('\n')[0][:100],  # 只取第一行，限制长度
+                        'full_message': message,
+                        'message_type': message_type,
                         'additions': stats.additions,
                         'deletions': stats.deletions,
-                        'total_changes': stats.total
+                        'total_changes': stats.total,
+                        'files_changed': len(files_changed),
+                        'files_details': files_changed[:5]  # 只保留前5个文件的详细信息
                     })
                     progress.update(task, advance=1)
                 except Exception as e:
+                    console.print(f"[yellow]⚠️ 处理commit时出错: {e}[/yellow]")
                     continue
         
         if not commits_data:
@@ -100,11 +122,45 @@ class CommitAnalyzer:
             'author_stats': self._analyze_author_stats(df),
             'code_changes': self._analyze_code_changes(df),
             'commit_frequency': self._analyze_commit_frequency(df),
+            'commit_patterns': self._analyze_commit_patterns(df),
+            'message_types': self._analyze_message_types(df),
+            'files_analysis': self._analyze_files(df),
             'raw_data': df.to_dict('records')
         }
         
         console.print(f"[green]✓ 分析完成，共处理 {len(df)} 个commits[/green]")
         return result
+    
+    def _classify_commit_message(self, message: str) -> str:
+        """分类commit消息类型"""
+        message_lower = message.lower()
+        
+        # 常见commit类型模式
+        patterns = {
+            'feat': r'\b(feat|feature|add)\b',
+            'fix': r'\b(fix|bug|issue)\b',
+            'docs': r'\b(docs|doc|readme|documentation)\b',
+            'style': r'\b(style|format|lint)\b',
+            'refactor': r'\b(refactor|restructure|reorganize)\b',
+            'test': r'\b(test|tests|testing)\b',
+            'chore': r'\b(chore|build|ci|travis|github)\b',
+            'perf': r'\b(perf|performance|optimize)\b',
+            'revert': r'\b(revert|undo|rollback)\b'
+        }
+        
+        for msg_type, pattern in patterns.items():
+            if re.search(pattern, message_lower):
+                return msg_type
+        
+        # 检查是否包含版本号
+        if re.search(r'\bv?\d+\.\d+\.\d+\b', message_lower):
+            return 'version'
+        
+        # 检查是否包含合并操作
+        if any(word in message_lower for word in ['merge', 'pull request', 'pr']):
+            return 'merge'
+        
+        return 'other'
     
     def _analyze_hourly_distribution(self, df: pd.DataFrame) -> Dict[str, Any]:
         """分析每小时commit分布"""
@@ -116,11 +172,23 @@ class CommitAnalyzer:
         
         peak_hour = all_hours.idxmax()
         
+        # 计算不同时间段的比例
+        night_ratio = float(all_hours[0:6].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0
+        morning_ratio = float(all_hours[6:12].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0
+        afternoon_ratio = float(all_hours[12:18].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0
+        evening_ratio = float(all_hours[18:24].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0
+        
         return {
             'distribution': all_hours.to_dict(),
             'peak_hour': peak_hour,
             'peak_count': int(all_hours[peak_hour]),
-            'working_hours_ratio': float(all_hours[9:18].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0
+            'working_hours_ratio': float(all_hours[9:18].sum() / all_hours.sum()) if all_hours.sum() > 0 else 0,
+            'time_slots': {
+                'night': night_ratio,
+                'morning': morning_ratio,
+                'afternoon': afternoon_ratio,
+                'evening': evening_ratio
+            }
         }
     
     def _analyze_weekday_distribution(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -134,11 +202,18 @@ class CommitAnalyzer:
         
         peak_day = all_weekdays.idxmax()
         
+        # 计算工作日vs周末
+        weekday_total = float(all_weekdays[0:5].sum())
+        weekend_total = float(all_weekdays[5:7].sum())
+        total = weekday_total + weekend_total
+        
         return {
             'distribution': {weekday_names[i]: int(all_weekdays[i]) for i in range(7)},
             'peak_day': weekday_names[peak_day],
             'peak_count': int(all_weekdays[peak_day]),
-            'weekend_ratio': float(all_weekdays[5:7].sum() / all_weekdays.sum()) if all_weekdays.sum() > 0 else 0
+            'weekend_ratio': float(all_weekdays[5:7].sum() / all_weekdays.sum()) if all_weekdays.sum() > 0 else 0,
+            'weekday_avg': float(weekday_total / 5) if weekday_total > 0 else 0,
+            'weekend_avg': float(weekend_total / 2) if weekend_total > 0 else 0
         }
     
     def _analyze_monthly_distribution(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -146,40 +221,91 @@ class CommitAnalyzer:
         df['year_month'] = df['date'].dt.to_period('M')
         monthly = df.groupby('year_month').size()
         
+        # 计算月度和季度统计
+        if len(monthly) > 0:
+            monthly_series = monthly.tolist()
+            monthly_change = [0] + [monthly_series[i] - monthly_series[i-1] for i in range(1, len(monthly_series))]
+            
+            # 季度统计
+            df['quarter'] = df['date'].dt.to_period('Q')
+            quarterly = df.groupby('quarter').size()
+        else:
+            monthly_change = []
+            quarterly = pd.Series()
+        
         return {
             'distribution': {str(k): int(v) for k, v in monthly.items()},
             'average_per_month': float(monthly.mean()),
             'max_month': str(monthly.idxmax()),
             'max_count': int(monthly.max()),
             'min_month': str(monthly.idxmin()),
-            'min_count': int(monthly.min())
+            'min_count': int(monthly.min()),
+            'monthly_changes': monthly_change,
+            'quarterly_distribution': {str(k): int(v) for k, v in quarterly.items()} if len(quarterly) > 0 else {}
         }
     
     def _analyze_author_stats(self, df: pd.DataFrame) -> Dict[str, Any]:
         """分析作者统计"""
         author_commits = df['author'].value_counts()
         
-        top_authors = author_commits.head(10).to_dict()
+        # 计算各种统计指标
+        total_authors = len(author_commits)
+        top_authors = author_commits.head(20).to_dict()
+        
+        # 活跃度分析
+        total_commits = len(df)
+        if total_authors > 0:
+            active_contributors = int((author_commits >= 10).sum())
+            occasional_contributors = int(((author_commits >= 2) & (author_commits < 10)).sum())
+            one_time_contributors = int((author_commits == 1).sum())
+        else:
+            active_contributors = occasional_contributors = one_time_contributors = 0
         
         return {
-            'total_authors': len(author_commits),
+            'total_authors': total_authors,
             'top_authors': top_authors,
             'top_contributor': author_commits.index[0] if len(author_commits) > 0 else None,
             'top_contributor_commits': int(author_commits.iloc[0]) if len(author_commits) > 0 else 0,
+            'top_contributor_ratio': float(author_commits.iloc[0] / total_commits) if len(author_commits) > 0 and total_commits > 0 else 0,
             'average_commits_per_author': float(author_commits.mean()),
-            'median_commits_per_author': float(author_commits.median())
+            'median_commits_per_author': float(author_commits.median()),
+            'std_commits_per_author': float(author_commits.std()),
+            'contributor_levels': {
+                'active': active_contributors,
+                'occasional': occasional_contributors,
+                'one_time': one_time_contributors
+            }
         }
     
     def _analyze_code_changes(self, df: pd.DataFrame) -> Dict[str, Any]:
         """分析代码变更"""
+        total_additions = int(df['additions'].sum())
+        total_deletions = int(df['deletions'].sum())
+        total_changes = total_additions + total_deletions
+        
+        # 计算净变化和变更效率
+        net_change = total_additions - total_deletions
+        change_ratio = total_additions / total_deletions if total_deletions > 0 else float('inf')
+        
+        # 大变更和小变更统计
+        large_changes = int((df['total_changes'] > 100).sum())
+        medium_changes = int(((df['total_changes'] >= 10) & (df['total_changes'] <= 100)).sum())
+        small_changes = int((df['total_changes'] < 10).sum())
+        
         return {
-            'total_additions': int(df['additions'].sum()),
-            'total_deletions': int(df['deletions'].sum()),
-            'total_changes': int(df['total_changes'].sum()),
+            'total_additions': total_additions,
+            'total_deletions': total_deletions,
+            'total_changes': total_changes,
+            'net_change': net_change,
             'average_additions_per_commit': float(df['additions'].mean()),
             'average_deletions_per_commit': float(df['deletions'].mean()),
             'max_single_commit_changes': int(df['total_changes'].max()),
-            'change_ratio': float(df['additions'].sum() / df['deletions'].sum()) if df['deletions'].sum() > 0 else float('inf')
+            'change_ratio': float(change_ratio),
+            'change_distribution': {
+                'large': large_changes,
+                'medium': medium_changes,
+                'small': small_changes
+            }
         }
     
     def _analyze_commit_frequency(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -189,23 +315,127 @@ class CommitAnalyzer:
         
         # 计算连续提交天数
         dates = sorted(df['date_only'].unique())
-        max_streak = 1
-        current_streak = 1
+        max_streak = 0
+        current_streak = 0
+        streak_start = None
+        streaks = []
         
-        for i in range(1, len(dates)):
-            if (dates[i] - dates[i-1]).days == 1:
-                current_streak += 1
-                max_streak = max(max_streak, current_streak)
-            else:
+        for i in range(len(dates)):
+            if i == 0 or (dates[i] - dates[i-1]).days > 1:
+                if current_streak > max_streak:
+                    max_streak = current_streak
+                if current_streak >= 2:  # 记录至少2天的连续提交
+                    streaks.append({
+                        'start': dates[i-current_streak],
+                        'end': dates[i-1],
+                        'length': current_streak
+                    })
                 current_streak = 1
+                streak_start = dates[i]
+            else:
+                current_streak += 1
+        
+        # 处理最后一个streak
+        if current_streak > max_streak:
+            max_streak = current_streak
+        if current_streak >= 2:
+            streaks.append({
+                'start': dates[-current_streak] if len(dates) >= current_streak else dates[0],
+                'end': dates[-1],
+                'length': current_streak
+            })
+        
+        # 计算间隔统计
+        gaps = []
+        for i in range(1, len(dates)):
+            gap = (dates[i] - dates[i-1]).days
+            gaps.append(gap)
+        
+        avg_gap = statistics.mean(gaps) if gaps else 0
+        max_gap = max(gaps) if gaps else 0
         
         return {
             'average_commits_per_day': float(daily_commits.mean()),
             'max_commits_per_day': int(daily_commits.max()),
             'max_commits_date': str(daily_commits.idxmax()),
             'active_days': len(daily_commits),
+            'inactive_days': days - len(daily_commits),
             'max_streak_days': max_streak,
+            'streaks': streaks[-5:],  # 只返回最近5个streak
+            'average_gap_days': float(avg_gap),
+            'max_gap_days': max_gap,
             'commits_per_week': float(len(df) / (len(dates) / 7)) if dates else 0
+        }
+    
+    def _analyze_commit_patterns(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析commit模式"""
+        # 计算提交大小分布
+        df['change_size'] = pd.cut(df['total_changes'], 
+                                   bins=[0, 10, 50, 100, 500, float('inf')],
+                                   labels=['tiny', 'small', 'medium', 'large', 'huge'])
+        
+        size_dist = df['change_size'].value_counts().to_dict()
+        
+        # 计算提交时间间隔（按作者）
+        df_sorted = df.sort_values(['author', 'date'])
+        df_sorted['time_diff'] = df_sorted.groupby('author')['date'].diff().dt.total_seconds() / 3600
+        
+        avg_time_between_commits = float(df_sorted['time_diff'].mean()) if not df_sorted['time_diff'].isnull().all() else 0
+        
+        return {
+            'size_distribution': size_dist,
+            'average_time_between_commits': avg_time_between_commits,
+            'commits_per_file': float(df['files_changed'].mean()),
+            'multi_file_commits': int((df['files_changed'] > 1).sum())
+        }
+    
+    def _analyze_message_types(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析commit消息类型"""
+        type_counts = df['message_type'].value_counts().to_dict()
+        total = len(df)
+        
+        type_percentages = {}
+        for msg_type, count in type_counts.items():
+            type_percentages[msg_type] = float(count / total)
+        
+        # 分析消息长度
+        df['message_length'] = df['full_message'].str.len()
+        avg_message_length = float(df['message_length'].mean())
+        
+        return {
+            'type_counts': type_counts,
+            'type_percentages': type_percentages,
+            'average_message_length': avg_message_length
+        }
+    
+    def _analyze_files(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析文件变更模式"""
+        # 统计文件变更频率
+        all_files = []
+        for files in df['files_details']:
+            if files:
+                all_files.extend([f['filename'] for f in files])
+        
+        if all_files:
+            file_counts = Counter(all_files)
+            top_files = dict(file_counts.most_common(20))
+            
+            # 分析文件扩展名
+            extensions = Counter()
+            for filename in all_files:
+                if '.' in filename:
+                    ext = filename.split('.')[-1].lower()
+                    extensions[ext] += 1
+            
+            top_extensions = dict(extensions.most_common(10))
+        else:
+            top_files = {}
+            top_extensions = {}
+        
+        return {
+            'most_changed_files': top_files,
+            'file_extensions': top_extensions,
+            'average_files_per_commit': float(df['files_changed'].mean())
         }
 
 
@@ -235,24 +465,42 @@ class ContributorAnalyzer:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            console=console
         ) as progress:
-            task = progress.add_task("获取贡献者信息...", total=None)
+            task = progress.add_task("获取贡献者信息...", total=max_contributors)
             
             for contributor in self.client.get_contributors(repo_name, max_count=max_contributors):
                 try:
+                    # 获取更多详细信息
+                    created_at = contributor.created_at
+                    account_age_days = (datetime.now() - created_at).days if created_at else 0
+                    
                     contributors_data.append({
                         'login': contributor.login,
                         'name': contributor.name or contributor.login,
                         'contributions': contributor.contributions,
                         'followers': contributor.followers,
+                        'following': contributor.following,
                         'public_repos': contributor.public_repos,
+                        'public_gists': contributor.public_gists,
                         'avatar_url': contributor.avatar_url,
                         'profile_url': contributor.html_url,
                         'company': contributor.company,
                         'location': contributor.location,
-                        'created_at': contributor.created_at
+                        'created_at': created_at,
+                        'updated_at': contributor.updated_at,
+                        'bio': contributor.bio,
+                        'email': contributor.email,
+                        'blog': contributor.blog,
+                        'twitter_username': contributor.twitter_username,
+                        'account_age_days': account_age_days,
+                        'hireable': contributor.hireable,
+                        'type': contributor.type
                     })
+                    progress.update(task, advance=1)
                 except Exception as e:
+                    console.print(f"[yellow]⚠️ 处理贡献者 {contributor.login} 时出错: {e}[/yellow]")
                     continue
         
         if not contributors_data:
@@ -266,7 +514,8 @@ class ContributorAnalyzer:
             'contribution_distribution': self._analyze_contribution_distribution(df),
             'top_contributors': self._get_top_contributors(df),
             'contributor_diversity': self._analyze_diversity(df),
-            'account_age_analysis': self._analyze_account_age(df),
+            'account_analysis': self._analyze_accounts(df),
+            'social_analysis': self._analyze_social(df),
             'raw_data': df.to_dict('records')
         }
         
@@ -280,14 +529,29 @@ class ContributorAnalyzer:
         # 计算贡献集中度（基尼系数）
         sorted_contributions = np.sort(contributions)
         n = len(sorted_contributions)
-        cumsum = np.cumsum(sorted_contributions)
-        gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n if n > 0 and cumsum[-1] > 0 else 0
+        if n > 0 and sorted_contributions.sum() > 0:
+            cumsum = np.cumsum(sorted_contributions)
+            gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+        else:
+            gini = 0
         
-        # 帕累托分析：前20%贡献者贡献了多少
-        top_20_percent_count = max(1, int(n * 0.2))
-        top_20_contributions = df.nlargest(top_20_percent_count, 'contributions')['contributions'].sum()
+        # 帕累托分析
         total_contributions = contributions.sum()
-        pareto_ratio = top_20_contributions / total_contributions if total_contributions > 0 else 0
+        
+        for percentage in [0.1, 0.2, 0.5]:
+            top_count = max(1, int(n * percentage))
+            top_contributions = df.nlargest(top_count, 'contributions')['contributions'].sum()
+            ratio = top_contributions / total_contributions if total_contributions > 0 else 0
+            
+            if percentage == 0.2:
+                pareto_ratio = ratio
+        
+        # 赫芬达尔-赫希曼指数（HHI）用于衡量集中度
+        if total_contributions > 0:
+            market_shares = contributions / total_contributions
+            hhi = (market_shares ** 2).sum() * 10000
+        else:
+            hhi = 0
         
         return {
             'total_contributions': int(total_contributions),
@@ -295,9 +559,11 @@ class ContributorAnalyzer:
             'median_contributions': float(contributions.median()),
             'std_contributions': float(contributions.std()),
             'gini_coefficient': float(gini),
+            'hhi_index': float(hhi),
             'pareto_ratio': float(pareto_ratio),  # 前20%贡献者的贡献比例
             'contribution_tiers': {
-                '1-10': int((contributions <= 10).sum()),
+                '1-5': int((contributions <= 5).sum()),
+                '6-10': int(((contributions > 5) & (contributions <= 10)).sum()),
                 '11-50': int(((contributions > 10) & (contributions <= 50)).sum()),
                 '51-100': int(((contributions > 50) & (contributions <= 100)).sum()),
                 '101-500': int(((contributions > 100) & (contributions <= 500)).sum()),
@@ -305,39 +571,94 @@ class ContributorAnalyzer:
             }
         }
     
-    def _get_top_contributors(self, df: pd.DataFrame, top_n: int = 10) -> List[Dict]:
+    def _get_top_contributors(self, df: pd.DataFrame, top_n: int = 15) -> List[Dict]:
         """获取顶级贡献者"""
         top = df.nlargest(top_n, 'contributions')
-        return top[['login', 'name', 'contributions', 'followers', 'profile_url']].to_dict('records')
+        return top[['login', 'name', 'contributions', 'followers', 'profile_url', 'company', 'location']].to_dict('records')
     
     def _analyze_diversity(self, df: pd.DataFrame) -> Dict[str, Any]:
         """分析贡献者多样性"""
         # 公司分布
         companies = df['company'].dropna()
-        company_distribution = companies.value_counts().head(10).to_dict() if len(companies) > 0 else {}
+        company_distribution = companies.value_counts().head(15).to_dict() if len(companies) > 0 else {}
         
         # 地理位置分布
         locations = df['location'].dropna()
-        location_distribution = locations.value_counts().head(10).to_dict() if len(locations) > 0 else {}
+        location_distribution = locations.value_counts().head(15).to_dict() if len(locations) > 0 else {}
+        
+        # 贡献者类型分布
+        types = df['type'].dropna()
+        type_distribution = types.value_counts().to_dict() if len(types) > 0 else {}
         
         return {
             'company_distribution': company_distribution,
             'location_distribution': location_distribution,
+            'type_distribution': type_distribution,
             'contributors_with_company': int(df['company'].notna().sum()),
-            'contributors_with_location': int(df['location'].notna().sum())
+            'contributors_with_location': int(df['location'].notna().sum()),
+            'company_ratio': float(df['company'].notna().sum() / len(df)) if len(df) > 0 else 0,
+            'location_ratio': float(df['location'].notna().sum() / len(df)) if len(df) > 0 else 0
         }
     
-    def _analyze_account_age(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """分析账户年龄"""
+    def _analyze_accounts(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析账户信息"""
+        # 账户年龄分析
         now = datetime.now()
-        df['account_age_days'] = (now - pd.to_datetime(df['created_at']).dt.tz_localize(None)).dt.days
+        df['account_age_days'] = df['account_age_days']
+        
+        # 活跃度分析
+        df['updated_days_ago'] = (now - pd.to_datetime(df['updated_at']).dt.tz_localize(None)).dt.days
+        
+        # 计算贡献密度
+        df['contributions_per_day'] = df['contributions'] / df['account_age_days'].clip(lower=1)
         
         return {
             'average_account_age_days': float(df['account_age_days'].mean()),
+            'median_account_age_days': float(df['account_age_days'].median()),
             'oldest_account_days': int(df['account_age_days'].max()),
             'newest_account_days': int(df['account_age_days'].min()),
-            'accounts_older_than_year': int((df['account_age_days'] > 365).sum()),
-            'accounts_newer_than_year': int((df['account_age_days'] <= 365).sum())
+            'accounts_by_age': {
+                '< 1年': int((df['account_age_days'] < 365).sum()),
+                '1-3年': int(((df['account_age_days'] >= 365) & (df['account_age_days'] < 1095)).sum()),
+                '3-5年': int(((df['account_age_days'] >= 1095) & (df['account_age_days'] < 1825)).sum()),
+                '> 5年': int((df['account_age_days'] >= 1825).sum())
+            },
+            'average_contributions_per_day': float(df['contributions_per_day'].mean()),
+            'recently_active': int((df['updated_days_ago'] < 30).sum()),
+            'inactive': int((df['updated_days_ago'] > 365).sum())
+        }
+    
+    def _analyze_social(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析社交信息"""
+        # 博客和社交媒体统计
+        has_blog = int(df['blog'].notna().sum())
+        has_twitter = int(df['twitter_username'].notna().sum())
+        has_email = int(df['email'].notna().sum())
+        has_bio = int(df['bio'].notna().sum())
+        
+        # 影响力分析
+        avg_followers = float(df['followers'].mean())
+        avg_following = float(df['following'].mean())
+        
+        # 高影响力用户
+        high_influence = int((df['followers'] > 1000).sum())
+        medium_influence = int(((df['followers'] >= 100) & (df['followers'] <= 1000)).sum())
+        low_influence = int((df['followers'] < 100).sum())
+        
+        return {
+            'social_presence': {
+                'has_blog': has_blog,
+                'has_twitter': has_twitter,
+                'has_email': has_email,
+                'has_bio': has_bio
+            },
+            'influence_stats': {
+                'average_followers': avg_followers,
+                'average_following': avg_following,
+                'high_influence': high_influence,
+                'medium_influence': medium_influence,
+                'low_influence': low_influence
+            }
         }
 
 
@@ -827,7 +1148,235 @@ class CodeQualityAnalyzer:
         score += min(refactor_ratio * 50, 10)
         
         return max(0, min(100, score))
-
+    
+class CodeComplexityAnalyzer:
+    """代码复杂度分析器
+    
+    分析代码变更的复杂性指标，如文件变更模式、依赖关系等
+    """
+    
+    def __init__(self, client: GitHubClient):
+        self.client = client
+        
+        # 复杂代码变更的特征
+        self.complexity_indicators = {
+            'high_entropy': ['config', 'settings', 'constant', 'enum'],  # 配置/常量文件
+            'critical': ['test', 'spec', '__tests__'],  # 测试文件
+            'infrastructure': ['docker', 'dockerfile', 'ci', '.github'],  # 基础设施文件
+            'documentation': ['readme', 'docs', 'guide', 'tutorial'],  # 文档文件
+        }
+    
+    def analyze_complexity(self, repo_name: str,
+                           commits_data: List[Dict] = None,
+                           max_commits: int = 200) -> Dict[str, Any]:
+        """
+        分析代码复杂度指标
+        
+        Args:
+            repo_name: 仓库名
+            commits_data: 已有的commits数据
+            max_commits: 最大commit数
+            
+        Returns:
+            代码复杂度分析结果
+        """
+        console.print(f"[cyan]正在分析 {repo_name} 的代码复杂度...[/cyan]")
+        
+        if commits_data is None:
+            # 获取commits数据
+            since = datetime.now() - timedelta(days=180)
+            commits_data = []
+            try:
+                for commit in self.client.get_commits(repo_name, since=since, max_count=max_commits):
+                    try:
+                        files_changed = []
+                        for file in commit.files:
+                            files_changed.append({
+                                'filename': file.filename,
+                                'additions': file.additions,
+                                'deletions': file.deletions,
+                                'changes': file.changes,
+                                'status': file.status
+                            })
+                        
+                        commits_data.append({
+                            'sha': commit.sha[:7],
+                            'message': commit.commit.message,
+                            'files_changed': files_changed,
+                            'date': commit.commit.author.date,
+                            'total_changes': commit.stats.total
+                        })
+                    except:
+                        continue
+            except Exception as e:
+                console.print(f"[yellow]⚠️ 获取commits时出错: {e}[/yellow]")
+        
+        if not commits_data:
+            return {'error': '未获取到commit数据'}
+        
+        result = {
+            'file_change_patterns': self._analyze_file_patterns(commits_data),
+            'dependency_changes': self._analyze_dependency_changes(commits_data),
+            'refactoring_complexity': self._analyze_refactoring_complexity(commits_data),
+            'architecture_changes': self._analyze_architecture_changes(commits_data),
+            'complexity_score': 0
+        }
+        
+        # 计算复杂度分数
+        result['complexity_score'] = self._calculate_complexity_score(result)
+        
+        console.print(f"[green]✓ 代码复杂度分析完成，复杂度分数: {result['complexity_score']:.1f}[/green]")
+        return result
+    
+    def _analyze_file_patterns(self, commits_data: List[Dict]) -> Dict[str, Any]:
+        """分析文件变更模式"""
+        all_files = []
+        file_types = Counter()
+        
+        for commit in commits_data:
+            for file_info in commit.get('files_changed', []):
+                filename = file_info['filename'].lower()
+                all_files.append(filename)
+                
+                # 分析文件类型
+                if '.' in filename:
+                    ext = filename.split('.')[-1]
+                    if len(ext) <= 5:  # 合理文件扩展名长度
+                        file_types[ext] += 1
+                
+                # 检查文件类别
+                for category, keywords in self.complexity_indicators.items():
+                    if any(keyword in filename for keyword in keywords):
+                        file_types[category] = file_types.get(category, 0) + 1
+        
+        # 计算文件变更的熵（衡量变更的集中度）
+        if all_files:
+            file_freq = Counter(all_files)
+            total_changes = len(all_files)
+            entropy = 0
+            for freq in file_freq.values():
+                probability = freq / total_changes
+                entropy -= probability * math.log2(probability) if probability > 0 else 0
+        else:
+            entropy = 0
+        
+        return {
+            'total_unique_files': len(set(all_files)),
+            'total_file_changes': len(all_files),
+            'most_frequently_changed_files': dict(file_freq.most_common(10)) if 'file_freq' in locals() else {},
+            'file_type_distribution': dict(file_types.most_common(15)),
+            'change_entropy': float(entropy),
+            'files_per_commit': len(all_files) / len(commits_data) if commits_data else 0
+        }
+    
+    def _analyze_dependency_changes(self, commits_data: List[Dict]) -> Dict[str, Any]:
+        """分析依赖变更"""
+        dependency_files = ['package.json', 'requirements.txt', 'pom.xml', 'build.gradle', 
+                           'cargo.toml', 'go.mod', 'composer.json', 'pyproject.toml']
+        
+        dependency_changes = 0
+        config_changes = 0
+        
+        for commit in commits_data:
+            message = commit.get('message', '').lower()
+            commit_files = [f['filename'].lower() for f in commit.get('files_changed', [])]
+            
+            # 检查依赖文件变更
+            if any(dep_file in commit_files for dep_file in dependency_files):
+                dependency_changes += 1
+            
+            # 检查配置文件变更
+            config_keywords = ['config', 'setting', 'properties', '.env', '.yml', '.yaml']
+            if any(keyword in message for keyword in ['depend', 'version', 'upgrade', 'update']) or \
+               any(keyword in ' '.join(commit_files) for keyword in config_keywords):
+                config_changes += 1
+        
+        return {
+            'dependency_file_changes': dependency_changes,
+            'config_file_changes': config_changes,
+            'dependency_change_ratio': dependency_changes / len(commits_data) if commits_data else 0,
+            'config_change_ratio': config_changes / len(commits_data) if commits_data else 0
+        }
+    
+    def _analyze_refactoring_complexity(self, commits_data: List[Dict]) -> Dict[str, Any]:
+        """分析重构复杂度"""
+        refactoring_keywords = ['refactor', 'restructure', 'reorganize', 'cleanup', 
+                               'rename', 'move', 'extract', 'inline', '重构']
+        
+        complex_refactoring = 0
+        simple_refactoring = 0
+        
+        for commit in commits_data:
+            message = commit.get('message', '').lower()
+            files_changed = commit.get('files_changed', [])
+            
+            # 检查重构提交
+            if any(keyword in message for keyword in refactoring_keywords):
+                # 分析重构复杂度
+                file_count = len(files_changed)
+                total_changes = sum(f['changes'] for f in files_changed)
+                
+                if file_count > 5 or total_changes > 100:
+                    complex_refactoring += 1
+                else:
+                    simple_refactoring += 1
+        
+        return {
+            'complex_refactoring_commits': complex_refactoring,
+            'simple_refactoring_commits': simple_refactoring,
+            'total_refactoring_commits': complex_refactoring + simple_refactoring,
+            'refactoring_ratio': (complex_refactoring + simple_refactoring) / len(commits_data) if commits_data else 0,
+            'complex_refactoring_ratio': complex_refactoring / len(commits_data) if commits_data else 0
+        }
+    
+    def _analyze_architecture_changes(self, commits_data: List[Dict]) -> Dict[str, Any]:
+        """分析架构变更"""
+        architecture_patterns = {
+            'module_structure': ['src/', 'lib/', 'modules/', 'packages/'],
+            'api_changes': ['api/', 'rest/', 'graphql', 'endpoint', 'route'],
+            'database': ['migration', 'schema', 'model', 'entity', 'table'],
+            'interface': ['interface', 'contract', 'protocol', 'api']
+        }
+        
+        architecture_changes = {category: 0 for category in architecture_patterns}
+        
+        for commit in commits_data:
+            message = commit.get('message', '').lower()
+            commit_files = ' '.join([f['filename'].lower() for f in commit.get('files_changed', [])])
+            
+            for category, patterns in architecture_patterns.items():
+                # 检查提交信息或文件路径中的架构相关关键词
+                if any(pattern in message or pattern in commit_files for pattern in patterns):
+                    architecture_changes[category] += 1
+        
+        return architecture_changes
+    
+    def _calculate_complexity_score(self, analysis_result: Dict) -> float:
+        """计算复杂度分数"""
+        score = 50.0  # 基础分
+        
+        file_patterns = analysis_result.get('file_change_patterns', {})
+        dependency = analysis_result.get('dependency_changes', {})
+        refactoring = analysis_result.get('refactoring_complexity', {})
+        
+        # 文件变更熵影响（0-20分）
+        entropy = file_patterns.get('change_entropy', 0)
+        score += min(entropy * 5, 20)
+        
+        # 依赖变更惩罚（最多扣15分）
+        dep_ratio = dependency.get('dependency_change_ratio', 0)
+        score -= min(dep_ratio * 30, 15)
+        
+        # 复杂重构奖励（最多加10分）
+        complex_refactor_ratio = refactoring.get('complex_refactoring_ratio', 0)
+        score += min(complex_refactor_ratio * 50, 10)
+        
+        # 架构变更加分（最多加15分）
+        arch_changes = analysis_result.get('architecture_changes', {})
+        total_arch_changes = sum(arch_changes.values())
+        score += min(total_arch_changes * 2, 15)
+        
+        return max(0, min(100, score))
 
 class ReleaseAnalyzer:
     """版本发布分析器
@@ -1410,6 +1959,7 @@ class RepoAnalyzer:
         self.issue_analyzer = IssueAnalyzer(client)
         self.pr_analyzer = PullRequestAnalyzer(client)
         self.code_quality_analyzer = CodeQualityAnalyzer(client)
+        self.code_complexity_analyzer = CodeComplexityAnalyzer(client)  # 新增
         self.release_analyzer = ReleaseAnalyzer(client)
         self.activity_analyzer = ActivityTrendAnalyzer(client)
         self.community_analyzer = CommunityHealthAnalyzer(client)
@@ -1424,6 +1974,7 @@ class RepoAnalyzer:
                       analyze_prs: bool = True,
                       analyze_releases: bool = True,
                       analyze_quality: bool = True,
+                      analyze_complexity: bool = True,  # 新增参数
                       analyze_trends: bool = True,
                       analyze_community: bool = True) -> Dict[str, Any]:
         """
@@ -1440,6 +1991,7 @@ class RepoAnalyzer:
             analyze_prs: 是否分析PRs
             analyze_releases: 是否分析发布版本
             analyze_quality: 是否分析代码质量
+            analyze_complexity: 是否分析代码复杂度（新增）
             analyze_trends: 是否分析活跃度趋势
             analyze_community: 是否分析社区健康度
             
@@ -1499,7 +2051,15 @@ class RepoAnalyzer:
             result['code_quality_analysis'] = self.code_quality_analyzer.analyze_code_quality(
                 repo_name, commits_data=commits_raw
             )
-        
+
+        # 代码复杂度分析
+        if analyze_complexity:
+            commits_raw = result.get('commit_analysis', {}).get('raw_data', [])
+            result['code_complexity_analysis'] = self.code_complexity_analyzer.analyze_complexity(
+                repo_name,
+                commits_data=commits_raw
+            )
+
         # 活跃度趋势分析
         if analyze_trends:
             commits_raw = result.get('commit_analysis', {}).get('raw_data', [])
@@ -1545,15 +2105,17 @@ class RepoAnalyzer:
             'overall_grade': ''
         }
         
-        # 收集各项分数
-        if 'code_quality_analysis' in analysis_result:
-            quality_score = analysis_result['code_quality_analysis'].get('quality_score', 0)
-            assessment['scores']['code_quality'] = quality_score
-            if quality_score >= 80:
-                assessment['strengths'].append('代码质量良好，提交信息规范')
-            elif quality_score < 60:
-                assessment['weaknesses'].append('提交信息质量有待提高')
-                assessment['recommendations'].append('建议采用Conventional Commits规范')
+        # 收集各项分数（添加复杂度分数）
+        if 'code_complexity_analysis' in analysis_result:
+            complexity_score = analysis_result['code_complexity_analysis'].get('complexity_score', 0)
+            assessment['scores']['code_complexity'] = complexity_score
+            
+            # 根据复杂度分数给出建议
+            if complexity_score > 70:
+                assessment['weaknesses'].append('代码复杂度较高，维护成本可能增加')
+                assessment['recommendations'].append('建议进行模块化重构，降低耦合度')
+            elif complexity_score < 30:
+                assessment['strengths'].append('代码结构简单清晰，易于维护')
         
         if 'community_health_analysis' in analysis_result:
             community_score = analysis_result['community_health_analysis'].get('community_score', 0)
