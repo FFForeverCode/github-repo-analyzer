@@ -259,6 +259,348 @@ def info(repo_name, token):
         sys.exit(1)
 
 
+@cli.command()
+@click.argument('repos', nargs=-1, required=True)
+@click.option('--output', '-o', default='output', help='输出目录')
+@click.option('--format', '-f', default='excel', 
+              type=click.Choice(['csv', 'excel', 'markdown', 'pdf']),
+              help='导出格式')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def compare(repos, output, format, token):
+    """
+    对比多个GitHub仓库
+    
+    REPOS: 多个仓库名，格式为 owner/repo，用空格分隔
+    
+    示例: python main.py compare facebook/react vuejs/vue angular/angular
+    """
+    print_banner()
+    
+    if len(repos) < 2:
+        console.print("[red]❌ 至少需要2个仓库进行比较[/red]")
+        sys.exit(1)
+    
+    try:
+        from src.comparator import RepoComparator, BenchmarkAnalyzer
+        from src.exporter import ExportManager
+        
+        client = GitHubClient(token=token)
+        analyzer = RepoAnalyzer(client)
+        comparator = RepoComparator()
+        
+        console.print(f"\n[cyan]正在分析 {len(repos)} 个仓库...[/cyan]\n")
+        
+        # 分析每个仓库
+        results = []
+        for repo_name in repos:
+            console.print(f"[dim]分析中: {repo_name}[/dim]")
+            try:
+                result = analyzer.full_analysis(
+                    repo_name=repo_name,
+                    days=365,
+                    max_commits=500,
+                    max_contributors=50,
+                    max_issues=200,
+                    max_prs=100
+                )
+                comparator.add_repo(result)
+                results.append(result)
+            except Exception as e:
+                console.print(f"[yellow]⚠ {repo_name} 分析失败: {e}[/yellow]")
+        
+        if len(results) < 2:
+            console.print("[red]❌ 成功分析的仓库不足2个[/red]")
+            sys.exit(1)
+        
+        # 执行比较
+        comparison = comparator.compare()
+        
+        # 打印比较结果
+        comparator.print_comparison_table()
+        comparator.print_rankings()
+        comparator.print_recommendations()
+        
+        # 导出结果
+        export_manager = ExportManager(output)
+        
+        # 导出比较JSON
+        comparator.export_comparison(output)
+        
+        console.print(f"\n[bold green]✅ 对比分析完成！[/bold green]")
+        console.print(f"[dim]结果已保存到 {output} 目录[/dim]")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 对比分析失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('repo_name')
+@click.option('--periods', '-p', default=6, help='预测周期数（月），默认6')
+@click.option('--output', '-o', default='output', help='输出目录')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def predict(repo_name, periods, output, token):
+    """
+    预测仓库未来趋势
+    
+    REPO_NAME: 仓库全名，格式为 owner/repo
+    
+    示例: python main.py predict facebook/react --periods 12
+    """
+    print_banner()
+    
+    try:
+        from src.predictor import ProjectHealthPredictor, SeasonalAnalyzer, AnomalyDetector
+        
+        client = GitHubClient(token=token)
+        analyzer = RepoAnalyzer(client)
+        
+        console.print(f"\n[cyan]正在分析 {repo_name} 并预测趋势...[/cyan]\n")
+        
+        # 分析仓库
+        result = analyzer.full_analysis(
+            repo_name=repo_name,
+            days=730,  # 获取2年数据以提高预测准确性
+            max_commits=2000
+        )
+        
+        # 趋势预测
+        predictor = ProjectHealthPredictor()
+        predictions = predictor.predict_project_health(result, periods)
+        
+        # 打印预测报告
+        predictor.print_prediction_report(predictions, repo_name)
+        
+        # 季节性分析
+        console.print("\n[bold]📅 季节性分析[/bold]")
+        seasonal_analyzer = SeasonalAnalyzer()
+        commit_data = result.get('commit_analysis', {})
+        monthly = commit_data.get('monthly_distribution', {}).get('distribution', {})
+        
+        if monthly:
+            seasonality = seasonal_analyzer.analyze_seasonality(monthly)
+            console.print(f"  是否有季节性: {'是' if seasonality['has_seasonality'] else '否'}")
+            console.print(f"  变异系数: {seasonality['coefficient_of_variation']}")
+            if seasonality['peak_months']:
+                console.print(f"  高峰月份: {', '.join(seasonality['peak_months'])}")
+            console.print(f"  模式描述: {seasonality['pattern_description']}")
+        
+        # 异常检测
+        console.print("\n[bold]🔍 异常检测[/bold]")
+        detector = AnomalyDetector()
+        if monthly:
+            anomalies = detector.detect_anomalies(
+                list(monthly.values()), 
+                list(monthly.keys())
+            )
+            if anomalies['has_anomalies']:
+                console.print(f"  发现 {len(anomalies['anomalies'])} 个异常点:")
+                for a in anomalies['anomalies'][:5]:
+                    console.print(f"    • {a.get('label', a['index'])}: {a['value']} (Z-score: {a['z_score']}, 类型: {a['type']})")
+            else:
+                console.print("  未发现明显异常")
+        
+        console.print(f"\n[bold green]✅ 预测分析完成！[/bold green]")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 预测分析失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('repo_name')
+@click.option('--format', '-f', default='excel',
+              type=click.Choice(['csv', 'excel', 'markdown', 'pdf', 'all']),
+              help='导出格式，默认excel')
+@click.option('--output', '-o', default='output', help='输出目录')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def export(repo_name, format, output, token):
+    """
+    分析并导出报告到指定格式
+    
+    REPO_NAME: 仓库全名，格式为 owner/repo
+    
+    示例: python main.py export facebook/react --format pdf
+    """
+    print_banner()
+    
+    try:
+        from src.exporter import ExportManager
+        
+        client = GitHubClient(token=token)
+        analyzer = RepoAnalyzer(client)
+        
+        console.print(f"\n[cyan]正在分析 {repo_name}...[/cyan]\n")
+        
+        # 分析仓库
+        result = analyzer.full_analysis(repo_name=repo_name)
+        
+        # 导出
+        export_manager = ExportManager(output)
+        safe_name = repo_name.replace('/', '_')
+        
+        if format == 'all':
+            console.print("[cyan]导出所有格式...[/cyan]")
+            files = export_manager.export_all(result, safe_name)
+            console.print("\n[bold green]✅ 导出完成！[/bold green]")
+            for fmt, path in files.items():
+                if path:
+                    console.print(f"  📄 {fmt.upper()}: {path}")
+        else:
+            filepath = export_manager.export(result, safe_name, format)
+            console.print(f"\n[bold green]✅ 导出完成！[/bold green]")
+            console.print(f"  📄 文件: {filepath}")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        console.print("[yellow]请确保已安装相关依赖: pip install openpyxl reportlab pandas[/yellow]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 导出失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('repo_name')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def benchmark(repo_name, token):
+    """
+    对仓库进行基准测试分析
+    
+    REPO_NAME: 仓库全名，格式为 owner/repo
+    
+    与同规模项目的行业标准进行对比
+    """
+    print_banner()
+    
+    try:
+        from src.comparator import BenchmarkAnalyzer
+        
+        client = GitHubClient(token=token)
+        analyzer = RepoAnalyzer(client)
+        
+        console.print(f"\n[cyan]正在分析 {repo_name} 并进行基准测试...[/cyan]\n")
+        
+        # 分析仓库
+        result = analyzer.full_analysis(repo_name=repo_name)
+        
+        # 基准分析
+        benchmark_analyzer = BenchmarkAnalyzer()
+        benchmark_result = benchmark_analyzer.analyze(result)
+        benchmark_analyzer.print_benchmark_report(benchmark_result)
+        
+        console.print(f"\n[bold green]✅ 基准测试完成！[/bold green]")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 基准测试失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+@cli.command()
+@click.option('--strategy', '-s', default='file',
+              type=click.Choice(['memory', 'file']),
+              help='缓存策略，默认file')
+@click.option('--action', '-a', default='stats',
+              type=click.Choice(['stats', 'clear']),
+              help='操作：stats查看统计，clear清空缓存')
+def cache(strategy, action):
+    """
+    管理API请求缓存
+    
+    示例: 
+        python main.py cache --action stats
+        python main.py cache --action clear
+    """
+    try:
+        from src.cache_manager import CacheManager
+        
+        cache_manager = CacheManager(strategy=strategy)
+        
+        if action == 'stats':
+            stats = cache_manager.get_stats()
+            console.print("\n[bold]📊 缓存统计[/bold]\n")
+            
+            table = Table()
+            table.add_column("指标", style="cyan")
+            table.add_column("值", style="white")
+            
+            for key, value in stats.items():
+                table.add_row(str(key), str(value))
+            
+            console.print(table)
+        
+        elif action == 'clear':
+            cache_manager.clear()
+            console.print("[green]✅ 缓存已清空[/green]")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 缓存操作失败: {e}[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('repo_name')
+@click.option('--output', '-o', default='output', help='输出目录')
+@click.option('--token', '-t', help='GitHub Personal Access Token')
+def dashboard(repo_name, output, token):
+    """
+    生成项目综合仪表盘
+    
+    REPO_NAME: 仓库全名，格式为 owner/repo
+    
+    生成包含所有关键指标的可视化仪表盘
+    """
+    print_banner()
+    
+    try:
+        from src.visualizer import DashboardGenerator
+        
+        client = GitHubClient(token=token)
+        analyzer = RepoAnalyzer(client)
+        
+        console.print(f"\n[cyan]正在分析 {repo_name} 并生成仪表盘...[/cyan]\n")
+        
+        # 分析仓库
+        result = analyzer.full_analysis(repo_name=repo_name)
+        
+        # 生成仪表盘
+        dashboard_gen = DashboardGenerator(output_dir=output)
+        filepath = dashboard_gen.generate_project_dashboard(result, repo_name)
+        
+        console.print(f"\n[bold green]✅ 仪表盘生成完成！[/bold green]")
+        console.print(f"  📊 文件: {filepath}")
+        
+    except ImportError as e:
+        console.print(f"[red]❌ 模块导入失败: {e}[/red]")
+        console.print("[yellow]请确保已安装matplotlib和seaborn[/yellow]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]❌ 仪表盘生成失败: {e}[/red]")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
 def main():
     """主入口函数"""
     cli()
