@@ -1,0 +1,29 @@
+# GitHub API
+PyGithub>=2.1.1
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 可视化
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.18.0
+
+# 命令行工具
+click>=8.1.0
+rich>=13.0.0
+
+# 配置管理
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# 日期处理
+python-dateutil>=2.8.0
+
+# 测试
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# 导出报告
+jinja2>=3.1.0
