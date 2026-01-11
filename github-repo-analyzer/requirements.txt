@@ -27,3 +27,21 @@ pytest-cov>=4.1.0
 
 # 导出报告
 jinja2>=3.1.0
+
+# Excel导出 (新增)
+openpyxl>=3.1.0
+
+# PDF导出 (新增)
+reportlab>=4.0.0
+
+# 词云生成 (新增)
+wordcloud>=1.9.0
+
+# 中文分词 (新增)
+jieba>=0.42.0
+
+# 网络图 (新增)
+networkx>=3.0
+
+# Redis缓存 (可选)
+# redis>=5.0.0
