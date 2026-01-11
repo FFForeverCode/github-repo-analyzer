@@ -257,4 +257,4 @@ print(f"峰值提交时间: {result['hourly_distribution']['peak_hour']}:00")
 - **Jinja2**: HTML 模板
 
 ## 📄 许可证
-本项目基于 MIT 许可证开源，详见 LICENSE 文件。
+本项目基于 MIT 许可证开源，详见项目中 LICENSE 文件。

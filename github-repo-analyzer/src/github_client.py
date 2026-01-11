@@ -5,9 +5,12 @@ GitHub API客户端模块
 """
 
 import time
+import json
+import hashlib
 from typing import Optional, List, Iterator, Any
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 
 from github import Github, GithubException
 from github.Repository import Repository
@@ -15,7 +18,6 @@ from github.Commit import Commit
 from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.NamedUser import NamedUser
-from github.PaginatedList import PaginatedList
 from rich.console import Console
 
 from .config import get_config
@@ -28,18 +30,81 @@ def rate_limit_handler(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         max_retries = 3
+        base_wait_time = 60
+        
         for attempt in range(max_retries):
             try:
                 return func(*args, **kwargs)
             except GithubException as e:
                 if e.status == 403 and 'rate limit' in str(e).lower():
-                    wait_time = 60 * (attempt + 1)
-                    console.print(f"[yellow]触发API速率限制，等待 {wait_time} 秒后重试...[/yellow]")
+                    # 计算等待时间（指数退避）
+                    wait_time = base_wait_time * (2 ** attempt)
+                    console.print(f"[yellow]⚠️ 触发API速率限制，等待 {wait_time} 秒后重试 ({attempt + 1}/{max_retries})...[/yellow]")
                     time.sleep(wait_time)
-                else:
+                elif e.status == 404:
+                    console.print(f"[red]❌ 资源未找到: {e.data.get('message', str(e))}[/red]")
                     raise
+                elif e.status == 429:
+                    console.print(f"[yellow]⚠️ 请求过多，等待30秒后重试...[/yellow]")
+                    time.sleep(30)
+                elif e.status >= 500:
+                    console.print(f"[yellow]⚠️ GitHub服务器错误，等待10秒后重试...[/yellow]")
+                    time.sleep(10)
+                else:
+                    console.print(f"[red]❌ GitHub API错误: {e.status} - {e.data.get('message', str(e))}[/red]")
+                    raise
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    console.print(f"[red]❌ 达到最大重试次数: {e}[/red]")
+                    raise
+                console.print(f"[yellow]⚠️ 发生错误，等待5秒后重试: {e}[/yellow]")
+                time.sleep(5)
+        
         raise Exception("达到最大重试次数，请稍后再试")
     return wrapper
+
+
+class CacheManager:
+    """缓存管理器"""
+    
+    def __init__(self, cache_dir: str = ".cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+    
+    def _get_cache_key(self, func_name: str, *args, **kwargs) -> str:
+        """生成缓存键"""
+        key_data = f"{func_name}:{args}:{kwargs}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def get(self, key: str, ttl: int = 3600) -> Optional[Any]:
+        """获取缓存"""
+        cache_file = self.cache_dir / f"{key}.json"
+        
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    data = json.load(f)
+                
+                # 检查是否过期
+                if datetime.now().timestamp() - data['timestamp'] < ttl:
+                    return data['value']
+            except:
+                pass
+        
+        return None
+    
+    def set(self, key: str, value: Any):
+        """设置缓存"""
+        cache_file = self.cache_dir / f"{key}.json"
+        
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump({
+                    'timestamp': datetime.now().timestamp(),
+                    'value': value
+                }, f, default=str)
+        except:
+            pass
 
 
 class GitHubClient:
@@ -56,24 +121,32 @@ class GitHubClient:
         self.token = token or config.get_github_config().token
         
         if not self.token:
-            raise ValueError("GitHub Token未配置，请设置GITHUB_TOKEN环境变量")
+            raise ValueError("GitHub Token未配置，请设置GITHUB_TOKEN环境变量或使用--token参数")
         
-        self.github = Github(self.token)
+        self.github = Github(self.token, timeout=30)
         self._repo_cache = {}
+        self.cache = CacheManager()
     
     def get_rate_limit(self) -> dict:
         """获取API速率限制信息"""
         rate_limit = self.github.get_rate_limit()
+        
+        # 计算重置时间倒计时
+        reset_time = rate_limit.core.reset
+        time_until_reset = max(0, (reset_time - datetime.now()).total_seconds())
+        
         return {
             'core': {
                 'limit': rate_limit.core.limit,
                 'remaining': rate_limit.core.remaining,
-                'reset_time': rate_limit.core.reset.strftime('%Y-%m-%d %H:%M:%S')
+                'reset_time': reset_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'reset_in_seconds': int(time_until_reset)
             },
             'search': {
                 'limit': rate_limit.search.limit,
                 'remaining': rate_limit.search.remaining,
-                'reset_time': rate_limit.search.reset.strftime('%Y-%m-%d %H:%M:%S')
+                'reset_time': rate_limit.search.reset.strftime('%Y-%m-%d %H:%M:%S'),
+                'reset_in_seconds': int(time_until_reset)
             }
         }
     
@@ -89,6 +162,7 @@ class GitHubClient:
             Repository对象
         """
         if repo_name not in self._repo_cache:
+            console.print(f"[dim]获取仓库信息: {repo_name}[/dim]")
             self._repo_cache[repo_name] = self.github.get_repo(repo_name)
         return self._repo_cache[repo_name]
     
@@ -103,25 +177,64 @@ class GitHubClient:
         Returns:
             仓库信息字典
         """
+        cache_key = self.cache._get_cache_key('get_repo_info', repo_name)
+        cached = self.cache.get(cache_key, ttl=3600)  # 缓存1小时
+        
+        if cached:
+            return cached
+        
         repo = self.get_repository(repo_name)
-        return {
-            'name': repo.name,
-            'full_name': repo.full_name,
-            'description': repo.description,
-            'language': repo.language,
-            'stars': repo.stargazers_count,
-            'forks': repo.forks_count,
-            'watchers': repo.watchers_count,
-            'open_issues': repo.open_issues_count,
-            'created_at': repo.created_at,
-            'updated_at': repo.updated_at,
-            'pushed_at': repo.pushed_at,
-            'size': repo.size,
-            'default_branch': repo.default_branch,
-            'license': repo.license.name if repo.license else None,
-            'topics': repo.get_topics(),
-            'url': repo.html_url
-        }
+        
+        # 获取更详细的信息
+        try:
+            # 获取README内容长度
+            readme_length = 0
+            try:
+                readme = repo.get_readme()
+                readme_length = len(readme.decoded_content)
+            except:
+                pass
+            
+            info = {
+                'name': repo.name,
+                'full_name': repo.full_name,
+                'description': repo.description,
+                'language': repo.language,
+                'stars': repo.stargazers_count,
+                'forks': repo.forks_count,
+                'watchers': repo.watchers_count,
+                'open_issues': repo.open_issues_count,
+                'created_at': repo.created_at,
+                'updated_at': repo.updated_at,
+                'pushed_at': repo.pushed_at,
+                'size': repo.size,
+                'default_branch': repo.default_branch,
+                'license': repo.license.name if repo.license else None,
+                'topics': repo.get_topics(),
+                'url': repo.html_url,
+                'has_wiki': repo.has_wiki,
+                'has_projects': repo.has_projects,
+                'has_downloads': repo.has_downloads,
+                'readme_size': readme_length,
+                'is_fork': repo.fork,
+                'parent': repo.parent.full_name if repo.parent else None
+            }
+        except Exception as e:
+            console.print(f"[yellow]⚠️ 获取仓库详细信息时出错: {e}[/yellow]")
+            info = {
+                'name': repo.name,
+                'full_name': repo.full_name,
+                'description': repo.description,
+                'language': repo.language,
+                'stars': repo.stargazers_count,
+                'forks': repo.forks_count,
+                'watchers': repo.watchers_count,
+                'open_issues': repo.open_issues_count,
+                'url': repo.html_url
+            }
+        
+        self.cache.set(cache_key, info)
+        return info
     
     @rate_limit_handler
     def get_commits(self, repo_name: str, since: Optional[datetime] = None,
@@ -150,11 +263,12 @@ class GitHubClient:
         commits = repo.get_commits(**kwargs)
         
         count = 0
-        for commit in commits:
-            if max_count and count >= max_count:
-                break
-            yield commit
-            count += 1
+        with console.status(f"[cyan]正在获取 {repo_name} 的commits...[/cyan]"):
+            for commit in commits:
+                if max_count and count >= max_count:
+                    break
+                yield commit
+                count += 1
     
     @rate_limit_handler
     def get_contributors(self, repo_name: str, 
@@ -173,11 +287,12 @@ class GitHubClient:
         contributors = repo.get_contributors()
         
         count = 0
-        for contributor in contributors:
-            if max_count and count >= max_count:
-                break
-            yield contributor
-            count += 1
+        with console.status(f"[cyan]正在获取 {repo_name} 的贡献者...[/cyan]"):
+            for contributor in contributors:
+                if max_count and count >= max_count:
+                    break
+                yield contributor
+                count += 1
     
     @rate_limit_handler
     def get_issues(self, repo_name: str, state: str = 'all',
@@ -204,13 +319,14 @@ class GitHubClient:
         issues = repo.get_issues(**kwargs)
         
         count = 0
-        for issue in issues:
-            # 排除Pull Request（GitHub API中PR也是Issue）
-            if issue.pull_request is None:
-                if max_count and count >= max_count:
-                    break
-                yield issue
-                count += 1
+        with console.status(f"[cyan]正在获取 {repo_name} 的Issues...[/cyan]"):
+            for issue in issues:
+                # 排除Pull Request（GitHub API中PR也是Issue）
+                if issue.pull_request is None:
+                    if max_count and count >= max_count:
+                        break
+                    yield issue
+                    count += 1
     
     @rate_limit_handler
     def get_pull_requests(self, repo_name: str, state: str = 'all',
@@ -230,11 +346,12 @@ class GitHubClient:
         pulls = repo.get_pulls(state=state, sort='created', direction='desc')
         
         count = 0
-        for pr in pulls:
-            if max_count and count >= max_count:
-                break
-            yield pr
-            count += 1
+        with console.status(f"[cyan]正在获取 {repo_name} 的Pull Requests...[/cyan]"):
+            for pr in pulls:
+                if max_count and count >= max_count:
+                    break
+                yield pr
+                count += 1
     
     @rate_limit_handler
     def get_branches(self, repo_name: str) -> List[dict]:
@@ -247,17 +364,29 @@ class GitHubClient:
         Returns:
             分支信息列表
         """
+        cache_key = self.cache._get_cache_key('get_branches', repo_name)
+        cached = self.cache.get(cache_key, ttl=1800)  # 缓存30分钟
+        
+        if cached:
+            return cached
+        
         repo = self.get_repository(repo_name)
         branches = repo.get_branches()
         
-        return [
-            {
-                'name': branch.name,
-                'protected': branch.protected,
-                'commit_sha': branch.commit.sha
-            }
-            for branch in branches
-        ]
+        result = []
+        for branch in branches:
+            try:
+                result.append({
+                    'name': branch.name,
+                    'protected': branch.protected,
+                    'commit_sha': branch.commit.sha[:7],
+                    'commit_url': branch.commit.html_url
+                })
+            except:
+                pass
+        
+        self.cache.set(cache_key, result)
+        return result
     
     @rate_limit_handler
     def get_releases(self, repo_name: str, 
@@ -272,6 +401,12 @@ class GitHubClient:
         Returns:
             发布版本信息列表
         """
+        cache_key = self.cache._get_cache_key('get_releases', repo_name, max_count)
+        cached = self.cache.get(cache_key, ttl=3600)
+        
+        if cached:
+            return cached
+        
         repo = self.get_repository(repo_name)
         releases = repo.get_releases()
         
@@ -287,10 +422,13 @@ class GitHubClient:
                 'published_at': release.published_at,
                 'draft': release.draft,
                 'prerelease': release.prerelease,
-                'author': release.author.login if release.author else None
+                'author': release.author.login if release.author else None,
+                'download_count': release.get_download_count(),
+                'assets_count': len(list(release.get_assets()))
             })
             count += 1
         
+        self.cache.set(cache_key, result)
         return result
     
     def search_repositories(self, query: str, 
@@ -307,18 +445,80 @@ class GitHubClient:
         Returns:
             仓库信息列表
         """
-        repos = self.github.search_repositories(query=query, sort=sort)
+        cache_key = self.cache._get_cache_key('search_repositories', query, sort, max_count)
+        cached = self.cache.get(cache_key, ttl=300)  # 搜索缓存5分钟
         
-        result = []
-        for i, repo in enumerate(repos):
-            if i >= max_count:
-                break
-            result.append({
-                'full_name': repo.full_name,
-                'description': repo.description,
-                'stars': repo.stargazers_count,
-                'language': repo.language,
-                'url': repo.html_url
-            })
+        if cached:
+            return cached
         
+        try:
+            repos = self.github.search_repositories(query=query, sort=sort)
+            
+            result = []
+            for i, repo in enumerate(repos):
+                if i >= max_count:
+                    break
+                result.append({
+                    'full_name': repo.full_name,
+                    'description': repo.description,
+                    'stars': repo.stargazers_count,
+                    'forks': repo.forks_count,
+                    'watchers': repo.watchers_count,
+                    'language': repo.language,
+                    'updated_at': repo.updated_at,
+                    'url': repo.html_url,
+                    'score': repo.score
+                })
+            
+            self.cache.set(cache_key, result)
+            return result
+            
+        except GithubException as e:
+            console.print(f"[red]搜索失败: {e.data.get('message', str(e))}[/red]")
+            return []
+    
+    def get_commit_activity(self, repo_name: str, weeks: int = 52) -> List[int]:
+        """
+        获取每周commit活动统计
+        
+        Args:
+            repo_name: 仓库全名
+            weeks: 统计周数
+            
+        Returns:
+            每周commit数量列表
+        """
+        cache_key = self.cache._get_cache_key('get_commit_activity', repo_name, weeks)
+        cached = self.cache.get(cache_key, ttl=3600)
+        
+        if cached:
+            return cached
+        
+        repo = self.get_repository(repo_name)
+        stats = repo.get_stats_commit_activity()
+        
+        if stats:
+            result = [week.total for week in stats][-weeks:]
+        else:
+            result = [0] * weeks
+        
+        self.cache.set(cache_key, result)
         return result
+    
+    def get_code_frequency(self, repo_name: str) -> List[tuple]:
+        """
+        获取代码频率统计
+        
+        Args:
+            repo_name: 仓库全名
+            
+        Returns:
+            每周代码变更统计列表
+        """
+        repo = self.get_repository(repo_name)
+        stats = repo.get_stats_code_frequency()
+        
+        if stats:
+            return [(week.week, week.additions, week.deletions) for week in stats]
+        return []
+    
