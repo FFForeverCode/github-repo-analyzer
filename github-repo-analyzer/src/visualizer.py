@@ -175,6 +175,379 @@ class ChartGenerator:
         
         return filepath
     
+    def generate_code_churn_chart(self, code_churn_data: Dict, filename: str) -> str:
+        """生成代码变更量（Code Churn）趋势图"""
+        fig, ax = plt.subplots(figsize=(14, 7))
+        
+        months = list(code_churn_data.get('monthly_churn', {}).keys())
+        additions = [code_churn_data['monthly_churn'][m].get('additions', 0) for m in months]
+        deletions = [code_churn_data['monthly_churn'][m].get('deletions', 0) for m in months]
+        
+        x = np.arange(len(months))
+        width = 0.35
+        
+        bars1 = ax.bar(x - width/2, additions, width, label='新增行数', color='#2ECC71', alpha=0.8)
+        bars2 = ax.bar(x + width/2, deletions, width, label='删除行数', color='#E74C3C', alpha=0.8)
+        
+        # 添加净变更折线
+        net_change = [a - d for a, d in zip(additions, deletions)]
+        ax2 = ax.twinx()
+        ax2.plot(x, net_change, 'b-o', linewidth=2, markersize=6, label='净变更')
+        ax2.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+        ax2.set_ylabel('净变更行数', fontsize=12, color='blue')
+        
+        ax.set_xlabel('月份', fontsize=12)
+        ax.set_ylabel('代码行数', fontsize=12)
+        ax.set_title('代码变更量趋势（Code Churn）', fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(months, rotation=45, ha='right')
+        
+        # 合并图例
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_contributor_growth_chart(self, growth_data: Dict, filename: str) -> str:
+        """生成贡献者增长曲线图"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # 左图：累计贡献者增长
+        months = list(growth_data.get('cumulative_contributors', {}).keys())
+        cumulative = list(growth_data.get('cumulative_contributors', {}).values())
+        
+        ax1.fill_between(range(len(months)), cumulative, alpha=0.3, color='#3498DB')
+        ax1.plot(range(len(months)), cumulative, 'o-', color='#3498DB', linewidth=2, markersize=6)
+        
+        ax1.set_xlabel('月份', fontsize=12)
+        ax1.set_ylabel('累计贡献者数量', fontsize=12)
+        ax1.set_title('贡献者累计增长趋势', fontsize=12, fontweight='bold')
+        ax1.set_xticks(range(len(months)))
+        ax1.set_xticklabels(months, rotation=45, ha='right')
+        
+        # 右图：每月新增贡献者
+        new_contributors = list(growth_data.get('new_contributors_per_month', {}).values())
+        colors = ['#2ECC71' if v > 0 else '#E74C3C' for v in new_contributors]
+        
+        ax2.bar(range(len(months)), new_contributors, color=colors, alpha=0.8)
+        ax2.axhline(y=np.mean(new_contributors), color='red', linestyle='--', 
+                   label=f'平均值: {np.mean(new_contributors):.1f}')
+        
+        ax2.set_xlabel('月份', fontsize=12)
+        ax2.set_ylabel('新增贡献者数量', fontsize=12)
+        ax2.set_title('每月新增贡献者', fontsize=12, fontweight='bold')
+        ax2.set_xticks(range(len(months)))
+        ax2.set_xticklabels(months, rotation=45, ha='right')
+        ax2.legend()
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_file_type_chart(self, file_data: Dict, filename: str) -> str:
+        """生成文件类型分布图"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # 饼图：文件类型分布
+        file_types = file_data.get('file_types', {})
+        labels = list(file_types.keys())[:10]
+        sizes = list(file_types.values())[:10]
+        colors = sns.color_palette("Set3", len(labels))
+        
+        wedges, texts, autotexts = ax1.pie(sizes, labels=labels, autopct='%1.1f%%',
+                                           colors=colors, startangle=90)
+        ax1.set_title('文件类型分布', fontsize=12, fontweight='bold')
+        
+        # 条形图：各类型文件数量
+        ax2.barh(labels[::-1], sizes[::-1], color=colors[::-1])
+        ax2.set_xlabel('文件数量', fontsize=12)
+        ax2.set_title('各类型文件数量', fontsize=12, fontweight='bold')
+        
+        for i, (label, size) in enumerate(zip(labels[::-1], sizes[::-1])):
+            ax2.text(size + 0.5, i, str(size), va='center', fontsize=10)
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_release_timeline_chart(self, release_data: Dict, filename: str) -> str:
+        """生成版本发布时间线图"""
+        fig, ax = plt.subplots(figsize=(16, 8))
+        
+        releases = release_data.get('releases', [])
+        if not releases:
+            ax.text(0.5, 0.5, '无发布版本数据', transform=ax.transAxes,
+                   ha='center', va='center', fontsize=14)
+            ax.axis('off')
+        else:
+            dates = [r.get('date', '') for r in releases]
+            versions = [r.get('version', '') for r in releases]
+            downloads = [r.get('downloads', 0) for r in releases]
+            
+            # 转换日期
+            try:
+                date_objects = [datetime.strptime(d, '%Y-%m-%d') for d in dates if d]
+            except:
+                date_objects = list(range(len(dates)))
+            
+            # 绘制时间线
+            ax.scatter(date_objects, [1]*len(date_objects), s=100, c='#3498DB', zorder=2)
+            ax.plot(date_objects, [1]*len(date_objects), 'b-', alpha=0.3, zorder=1)
+            
+            # 添加版本标签
+            for i, (date, version) in enumerate(zip(date_objects, versions)):
+                y_offset = 0.1 if i % 2 == 0 else -0.1
+                ax.annotate(version, (date, 1), xytext=(date, 1 + y_offset),
+                           ha='center', fontsize=9, rotation=45)
+            
+            ax.set_ylim(0.5, 1.5)
+            ax.set_xlabel('发布日期', fontsize=12)
+            ax.set_title('版本发布时间线', fontsize=14, fontweight='bold')
+            ax.yaxis.set_visible(False)
+            
+            if isinstance(date_objects[0], datetime):
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+                ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+                plt.xticks(rotation=45)
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_activity_radar_chart(self, activity_data: Dict, filename: str) -> str:
+        """生成项目活跃度雷达图"""
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+        
+        # 定义评估维度
+        categories = ['Commit活跃度', '贡献者多样性', 'Issue响应速度', 
+                     'PR合并效率', '代码质量', '社区参与度']
+        N = len(categories)
+        
+        # 获取各维度分数（0-100）
+        scores = [
+            activity_data.get('commit_activity', 50),
+            activity_data.get('contributor_diversity', 50),
+            activity_data.get('issue_response', 50),
+            activity_data.get('pr_efficiency', 50),
+            activity_data.get('code_quality', 50),
+            activity_data.get('community_engagement', 50)
+        ]
+        
+        # 计算角度
+        angles = [n / float(N) * 2 * np.pi for n in range(N)]
+        scores += scores[:1]  # 闭合图形
+        angles += angles[:1]
+        
+        # 绘制雷达图
+        ax.plot(angles, scores, 'o-', linewidth=2, color='#3498DB')
+        ax.fill(angles, scores, alpha=0.25, color='#3498DB')
+        
+        # 设置刻度标签
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(categories, fontsize=11)
+        ax.set_ylim(0, 100)
+        
+        # 添加网格线
+        ax.set_yticks([20, 40, 60, 80, 100])
+        ax.set_yticklabels(['20', '40', '60', '80', '100'], fontsize=9)
+        
+        ax.set_title('项目活跃度综合评估', fontsize=14, fontweight='bold', pad=20)
+        
+        # 添加总分
+        total_score = np.mean(scores[:-1])
+        ax.text(0, 0, f'综合评分\n{total_score:.1f}', ha='center', va='center',
+               fontsize=16, fontweight='bold', color='#E74C3C')
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_commit_message_length_chart(self, message_data: Dict, filename: str) -> str:
+        """生成Commit消息长度分布图"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        lengths = message_data.get('lengths', [])
+        
+        if lengths:
+            # 直方图
+            ax1.hist(lengths, bins=30, color='#3498DB', edgecolor='white', alpha=0.7)
+            ax1.axvline(x=np.mean(lengths), color='red', linestyle='--', 
+                       label=f'平均值: {np.mean(lengths):.1f}')
+            ax1.axvline(x=np.median(lengths), color='green', linestyle='--',
+                       label=f'中位数: {np.median(lengths):.1f}')
+            ax1.set_xlabel('消息长度（字符）', fontsize=12)
+            ax1.set_ylabel('频次', fontsize=12)
+            ax1.set_title('Commit消息长度分布', fontsize=12, fontweight='bold')
+            ax1.legend()
+            
+            # 箱线图
+            bp = ax2.boxplot(lengths, vert=True, patch_artist=True)
+            bp['boxes'][0].set_facecolor('#3498DB')
+            bp['boxes'][0].set_alpha(0.7)
+            
+            # 添加统计信息
+            stats_text = f"""
+统计信息:
+- 最短: {min(lengths)}
+- 最长: {max(lengths)}
+- 平均值: {np.mean(lengths):.1f}
+- 标准差: {np.std(lengths):.1f}
+- 四分位数: Q1={np.percentile(lengths, 25):.0f}, 
+           Q3={np.percentile(lengths, 75):.0f}
+            """
+            ax2.text(1.3, np.median(lengths), stats_text, fontsize=10,
+                    verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+            ax2.set_ylabel('消息长度（字符）', fontsize=12)
+            ax2.set_title('Commit消息长度箱线图', fontsize=12, fontweight='bold')
+        else:
+            ax1.text(0.5, 0.5, '无数据', transform=ax1.transAxes, ha='center', va='center')
+            ax2.text(0.5, 0.5, '无数据', transform=ax2.transAxes, ha='center', va='center')
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_bus_factor_chart(self, bus_factor_data: Dict, filename: str) -> str:
+        """生成Bus Factor（关键人物依赖）可视化图"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # 左图：关键贡献者贡献占比
+        key_contributors = bus_factor_data.get('key_contributors', [])
+        names = [c.get('name', 'Unknown') for c in key_contributors[:5]]
+        contributions = [c.get('percentage', 0) for c in key_contributors[:5]]
+        
+        colors = ['#E74C3C' if p > 30 else '#F39C12' if p > 15 else '#2ECC71' 
+                 for p in contributions]
+        
+        bars = ax1.barh(names[::-1], contributions[::-1], color=colors[::-1])
+        ax1.set_xlabel('贡献占比 (%)', fontsize=12)
+        ax1.set_title('关键贡献者贡献占比', fontsize=12, fontweight='bold')
+        ax1.axvline(x=30, color='red', linestyle='--', alpha=0.5, label='高风险线(30%)')
+        ax1.legend()
+        
+        for bar, pct in zip(bars, contributions[::-1]):
+            ax1.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                    f'{pct:.1f}%', va='center', fontsize=10)
+        
+        # 右图：Bus Factor指示器
+        bus_factor = bus_factor_data.get('bus_factor', 1)
+        
+        # 创建仪表盘效果
+        theta = np.linspace(0, np.pi, 100)
+        r = 1
+        x = r * np.cos(theta)
+        y = r * np.sin(theta)
+        
+        ax2.plot(x, y, 'k-', linewidth=2)
+        ax2.fill_between(x, y, alpha=0.1)
+        
+        # 分区着色
+        colors_zones = ['#E74C3C', '#F39C12', '#F1C40F', '#2ECC71']
+        for i, color in enumerate(colors_zones):
+            theta_start = i * np.pi / 4
+            theta_end = (i + 1) * np.pi / 4
+            theta_zone = np.linspace(theta_start, theta_end, 25)
+            ax2.fill_between(np.cos(theta_zone), np.sin(theta_zone), 
+                           alpha=0.3, color=color)
+        
+        # 绘制指针
+        pointer_angle = np.pi - (bus_factor / 10) * np.pi  # 假设最大值为10
+        pointer_angle = max(0, min(np.pi, pointer_angle))
+        ax2.annotate('', xy=(0.8*np.cos(pointer_angle), 0.8*np.sin(pointer_angle)),
+                    xytext=(0, 0),
+                    arrowprops=dict(arrowstyle='->', color='black', lw=3))
+        
+        ax2.text(0, -0.2, f'Bus Factor: {bus_factor}', ha='center', 
+                fontsize=16, fontweight='bold')
+        
+        # 添加刻度标签
+        for i in range(5):
+            angle = np.pi - (i * 2.5 / 10) * np.pi
+            ax2.text(1.1*np.cos(angle), 1.1*np.sin(angle), str(int(i*2.5)),
+                    ha='center', va='center', fontsize=10)
+        
+        ax2.set_xlim(-1.5, 1.5)
+        ax2.set_ylim(-0.5, 1.3)
+        ax2.axis('off')
+        ax2.set_title('Bus Factor 指标', fontsize=12, fontweight='bold')
+        
+        # 风险说明
+        risk_text = "风险等级:\n🔴 1-2: 极高风险\n🟠 3-4: 高风险\n🟡 5-6: 中等风险\n🟢 7+: 低风险"
+        ax2.text(1.0, 0.5, risk_text, fontsize=10, 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
+    def generate_review_time_chart(self, review_data: Dict, filename: str) -> str:
+        """生成PR审查时间分布图"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        review_times = review_data.get('review_times_hours', [])
+        
+        if review_times:
+            # 直方图
+            ax1.hist(review_times, bins=20, color='#9B59B6', edgecolor='white', alpha=0.7)
+            ax1.axvline(x=np.median(review_times), color='red', linestyle='--',
+                       label=f'中位数: {np.median(review_times):.1f}h')
+            ax1.set_xlabel('审查时间（小时）', fontsize=12)
+            ax1.set_ylabel('PR数量', fontsize=12)
+            ax1.set_title('PR审查时间分布', fontsize=12, fontweight='bold')
+            ax1.legend()
+            
+            # 分类统计
+            categories = ['< 1h', '1-4h', '4-24h', '1-7天', '> 7天']
+            counts = [
+                len([t for t in review_times if t < 1]),
+                len([t for t in review_times if 1 <= t < 4]),
+                len([t for t in review_times if 4 <= t < 24]),
+                len([t for t in review_times if 24 <= t < 168]),
+                len([t for t in review_times if t >= 168])
+            ]
+            colors = ['#2ECC71', '#27AE60', '#F39C12', '#E67E22', '#E74C3C']
+            
+            ax2.pie(counts, labels=categories, autopct='%1.1f%%', colors=colors,
+                   startangle=90)
+            ax2.set_title('审查时间分类', fontsize=12, fontweight='bold')
+        else:
+            ax1.text(0.5, 0.5, '无审查时间数据', transform=ax1.transAxes, 
+                    ha='center', va='center')
+            ax2.text(0.5, 0.5, '无审查时间数据', transform=ax2.transAxes,
+                    ha='center', va='center')
+        
+        plt.tight_layout()
+        filepath = os.path.join(self.output_dir, f"{filename}.png")
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return filepath
+    
     def generate_weekday_chart(self, weekday_data: Dict, filename: str) -> str:
         """生成每周commit分布图"""
         fig, ax = plt.subplots(figsize=(10, 6))
