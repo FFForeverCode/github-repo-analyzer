@@ -18,6 +18,7 @@ class TestGitHubConfig:
     def test_default_values(self):
         """测试默认配置值"""
         config = GitHubConfig()
+        # 验证默认值是否符合预期
         assert config.base_url == "https://api.github.com"
         assert config.timeout == 30
         assert config.retry_count == 3
@@ -30,6 +31,7 @@ class TestGitHubConfig:
         # 注意：由于dotenv会被调用，实际行为可能不同
         # 这里只是验证机制存在
         assert True
+        # 如果代码执行到这里没有异常，说明基本机制正常
 
 
 class TestAnalysisConfig:

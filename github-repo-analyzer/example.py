@@ -216,7 +216,7 @@ def main():
             example_contributor_analysis()
             example_search_repos()
             # 完整分析比较耗时，单独确认
-            run_full = input("\n是否运行完整分析（耗时较长）? (y/n): ").strip().lower()
+            run_full = input("\n是否运行完整分析（可能耗时较长）? (请输入：y/n): ").strip().lower()
             if run_full == 'y':
                 example_full_analysis()
         elif choice == '0':
