@@ -2,6 +2,7 @@
 缓存管理模块
 
 提供多种缓存策略，减少API调用次数，提升分析效率
+已集成：智能容量清理策略 (Smart Capacity Eviction)
 """
 
 import os
@@ -121,12 +122,16 @@ class MemoryCache(CacheStrategy):
 
 
 class FileCache(CacheStrategy):
-    """文件缓存策略"""
+    """
+    文件缓存策略
+    增强：支持 max_size_mb 自动容量清理
+    """
     
-    def __init__(self, cache_dir: str = ".cache"):
+    def __init__(self, cache_dir: str = ".cache", max_size_mb: int = 500):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.meta_file = self.cache_dir / "cache_meta.json"
+        self.max_size_bytes = max_size_mb * 1024 * 1024
         self._load_meta()
     
     def _load_meta(self):
@@ -163,6 +168,9 @@ class FileCache(CacheStrategy):
             if expiry and datetime.fromisoformat(expiry) < datetime.now():
                 self.delete(key)
                 return None
+            
+            # 更新最后访问时间（用于LRU清理）
+            self._meta[key]['last_access'] = datetime.now().isoformat()
         
         try:
             with open(cache_path, 'rb') as f:
@@ -172,14 +180,17 @@ class FileCache(CacheStrategy):
     
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         """设置缓存"""
-        cache_path = self._get_cache_path(key)
+        # 在设置新缓存前，确保有足够空间
+        self.ensure_capacity()
         
+        cache_path = self._get_cache_path(key)
         try:
             with open(cache_path, 'wb') as f:
                 pickle.dump(value, f)
             
             self._meta[key] = {
                 'created': datetime.now().isoformat(),
+                'last_access': datetime.now().isoformat(),
                 'expiry': (datetime.now() + timedelta(seconds=ttl)).isoformat() if ttl else None,
                 'size': cache_path.stat().st_size
             }
@@ -188,23 +199,57 @@ class FileCache(CacheStrategy):
         except Exception as e:
             console.print(f"[red]缓存写入失败: {e}[/red]")
             return False
+
+    def ensure_capacity(self) -> int:
+        """
+        [新增功能] 智能容量检查
+        如果超过最大限制，删除最久未使用的缓存
+        """
+        current_size = sum(f.stat().st_size for f in self.cache_dir.glob("*.cache"))
+        if current_size < self.max_size_bytes:
+            return 0
+        
+        console.print(f"[yellow]缓存占用 ({current_size / 1024 / 1024:.1f}MB) 超过阈值，启动自动清理...[/yellow]")
+        
+        # 按最后访问时间排序
+        sorted_keys = sorted(
+            self._meta.keys(), 
+            key=lambda k: self._meta[k].get('last_access', self._meta[k].get('created', ''))
+        )
+        
+        deleted_count = 0
+        for key in sorted_keys:
+            if current_size < self.max_size_bytes * 0.7:  # 清理到70%为止
+                break
+            
+            # 获取大小并删除
+            cache_path = self._get_cache_path(key)
+            if cache_path.exists():
+                size = cache_path.stat().st_size
+                cache_path.unlink()
+                current_size -= size
+                deleted_count += 1
+            
+            if key in self._meta:
+                del self._meta[key]
+        
+        self._save_meta()
+        if deleted_count > 0:
+            console.print(f"[green]已自动清理 {deleted_count} 个陈旧缓存文件[/green]")
+        return deleted_count
     
     def delete(self, key: str) -> bool:
         """删除缓存"""
         cache_path = self._get_cache_path(key)
-        
         if cache_path.exists():
             cache_path.unlink()
-        
         if key in self._meta:
             del self._meta[key]
             self._save_meta()
-        
         return True
     
     def clear(self) -> bool:
         """清空缓存"""
-        import shutil
         try:
             for f in self.cache_dir.glob("*.cache"):
                 f.unlink()
@@ -225,6 +270,7 @@ class FileCache(CacheStrategy):
             'total_keys': len(self._meta),
             'total_size_bytes': total_size,
             'total_size_mb': total_size / (1024 * 1024),
+            'max_size_mb': self.max_size_bytes / (1024 * 1024),
             'cache_dir': str(self.cache_dir)
         }
     
@@ -322,10 +368,6 @@ class CacheManager:
     def __init__(self, strategy: str = 'memory', **kwargs):
         """
         初始化缓存管理器
-        
-        Args:
-            strategy: 缓存策略 ('memory', 'file', 'redis')
-            **kwargs: 策略特定参数
         """
         self.strategy_name = strategy
         
@@ -333,7 +375,8 @@ class CacheManager:
             self.cache = MemoryCache()
         elif strategy == 'file':
             cache_dir = kwargs.get('cache_dir', '.cache')
-            self.cache = FileCache(cache_dir)
+            max_size = kwargs.get('max_size_mb', 500)
+            self.cache = FileCache(cache_dir, max_size)
         elif strategy == 'redis':
             self.cache = RedisCache(**kwargs)
         else:
@@ -399,32 +442,23 @@ def cached(cache_manager: CacheManager = None, ttl: int = 3600,
            key_prefix: str = ''):
     """
     缓存装饰器
-    
-    Args:
-        cache_manager: 缓存管理器实例
-        ttl: 缓存过期时间（秒）
-        key_prefix: 缓存键前缀
     """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # 生成缓存键
             key_parts = [key_prefix or func.__name__]
             key_parts.extend(str(arg) for arg in args)
             key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
             cache_key = ':'.join(key_parts)
             
-            # 获取或使用缓存管理器
             cm = cache_manager or getattr(wrapper, '_cache_manager', None)
             if cm is None:
                 cm = MemoryCache()
             
-            # 尝试从缓存获取
             cached_value = cm.get(cache_key)
             if cached_value is not None:
                 return cached_value
             
-            # 执行函数并缓存结果
             result = func(*args, **kwargs)
             cm.set(cache_key, result, ttl)
             return result
@@ -438,43 +472,30 @@ class CachedGitHubClient:
     
     def __init__(self, client, cache_manager: CacheManager = None,
                  default_ttl: int = 3600):
-        """
-        初始化带缓存的客户端
-        
-        Args:
-            client: GitHubClient实例
-            cache_manager: 缓存管理器
-            default_ttl: 默认缓存过期时间（秒）
-        """
         self.client = client
         self.cache = cache_manager or CacheManager(strategy='file')
         self.default_ttl = default_ttl
     
     def _make_key(self, method: str, *args, **kwargs) -> str:
-        """生成缓存键"""
         key_parts = [method]
         key_parts.extend(str(arg) for arg in args)
         key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
         return hashlib.md5(':'.join(key_parts).encode()).hexdigest()
     
     def get_repo_info(self, repo_name: str, ttl: int = None) -> dict:
-        """获取仓库信息（带缓存）"""
         cache_key = self._make_key('repo_info', repo_name)
-        
         cached = self.cache.get(cache_key)
         if cached:
             console.print(f"[dim]从缓存获取仓库信息: {repo_name}[/dim]")
             return cached
         
         result = self.client.get_repo_info(repo_name)
-        # 转换datetime对象为字符串以便缓存
         result = self._serialize_result(result)
         self.cache.set(cache_key, result, ttl or self.default_ttl)
         return result
     
     def get_commits_cached(self, repo_name: str, since=None, until=None,
                            max_count: int = None, ttl: int = None) -> list:
-        """获取提交记录（带缓存）"""
         cache_key = self._make_key('commits', repo_name, 
                                    since=str(since), until=str(until),
                                    max_count=max_count)
@@ -501,9 +522,7 @@ class CachedGitHubClient:
     
     def get_contributors_cached(self, repo_name: str, 
                                 max_count: int = None, ttl: int = None) -> list:
-        """获取贡献者（带缓存）"""
         cache_key = self._make_key('contributors', repo_name, max_count=max_count)
-        
         cached = self.cache.get(cache_key)
         if cached:
             console.print(f"[dim]从缓存获取贡献者: {repo_name}[/dim]")
@@ -522,7 +541,6 @@ class CachedGitHubClient:
         return contributors
     
     def _serialize_result(self, result: Any) -> Any:
-        """序列化结果，处理datetime等不可序列化的对象"""
         if isinstance(result, dict):
             return {k: self._serialize_result(v) for k, v in result.items()}
         elif isinstance(result, list):
@@ -533,19 +551,15 @@ class CachedGitHubClient:
             return result
     
     def get_cache_stats(self) -> Dict:
-        """获取缓存统计"""
         return self.cache.get_stats()
     
     def clear_cache(self) -> bool:
-        """清空缓存"""
         return self.cache.clear()
 
 
-# 全局缓存管理器
 _global_cache = None
 
 def get_cache_manager(strategy: str = 'file', **kwargs) -> CacheManager:
-    """获取全局缓存管理器"""
     global _global_cache
     if _global_cache is None:
         _global_cache = CacheManager(strategy, **kwargs)
