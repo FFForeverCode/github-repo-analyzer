@@ -53,6 +53,9 @@ class RepoMetrics:
     community_score: float = 0.0
     overall_score: float = 0.0
     
+    # [新增字段：不破坏原有构造]
+    stack_footprint: Dict[str, float] = field(default_factory=dict)
+    
     @classmethod
     def from_analysis_result(cls, data: Dict) -> 'RepoMetrics':
         """从分析结果创建指标对象"""
@@ -93,6 +96,8 @@ class RepoComparator:
         """添加仓库分析结果"""
         metrics = RepoMetrics.from_analysis_result(analysis_result)
         self._calculate_scores(metrics)
+        # [新增调用：分析技术栈特征]
+        self._analyze_stack_footprint(metrics, analysis_result)
         self.repos.append(metrics)
     
     def add_repos(self, analysis_results: List[Dict]):
@@ -149,6 +154,29 @@ class RepoComparator:
             close_time_score = 50  # 无数据给中等分
         
         return merge_rate_score * 0.5 + close_time_score * 0.5
+
+    def _analyze_stack_footprint(self, metrics: RepoMetrics, raw_data: Dict):
+        """
+        [新增功能] 分析技术栈足迹
+        利用语言分布和仓库描述简单推断项目的'技术指纹'
+        """
+        repo_info = raw_data.get('repo_info', {})
+        description = str(repo_info.get('description', '')).lower()
+        
+        # 预定义一些技术关键词权重
+        footprint = {"Web": 0.0, "AI/ML": 0.0, "System": 0.0, "Tool": 0.0}
+        
+        # 简单逻辑：根据主语言和描述打分
+        lang = metrics.language.lower()
+        if lang in ['python', 'r', 'julia']: footprint["AI/ML"] += 40
+        if lang in ['javascript', 'typescript', 'html', 'css']: footprint["Web"] += 50
+        if lang in ['c', 'cpp', 'rust', 'go']: footprint["System"] += 50
+        
+        if 'api' in description or 'web' in description: footprint["Web"] += 30
+        if 'deep learning' in description or 'model' in description: footprint["AI/ML"] += 40
+        if 'cli' in description or 'utility' in description: footprint["Tool"] += 50
+        
+        metrics.stack_footprint = {k: min(100.0, v) for k, v in footprint.items()}
     
     def compare(self) -> Dict:
         """执行比较分析"""
@@ -180,6 +208,7 @@ class RepoComparator:
             'pr_merge_rate': repo.pr_merge_rate,
             'language': repo.language,
             'license': repo.license,
+            'stack_footprint': repo.stack_footprint, # [新增导出]
             'scores': {
                 'popularity': round(repo.popularity_score, 2),
                 'activity': round(repo.activity_score, 2),
