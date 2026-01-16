@@ -2,6 +2,7 @@
 报告生成模块
 
 生成HTML和JSON格式的分析报告
+已集成：仓库健康度诊断 (Repository Health Diagnosis)
 """
 
 import os
@@ -14,8 +15,6 @@ from rich.console import Console
 
 console = Console()
 
-
-# HTML报告模板
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -64,6 +63,42 @@ HTML_TEMPLATE = """
             opacity: 0.8;
             font-size: 1.1em;
         }
+
+        /* --- 新增：健康诊断卡片样式 --- */
+        .health-dashboard {
+            display: flex;
+            align-items: center;
+            background: #fff;
+            margin: 30px 40px 10px 40px;
+            padding: 30px;
+            border-radius: 15px;
+            border-left: 12px solid {{ health_diagnosis.color }};
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
+        .health-score-ring {
+            width: 110px; height: 110px;
+            border-radius: 50%;
+            background: {{ health_diagnosis.color }};
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin-right: 35px;
+            flex-shrink: 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .health-score-ring .score-val { font-size: 2.2em; font-weight: 800; line-height: 1; }
+        .health-score-ring .score-label { font-size: 0.75em; margin-top: 5px; opacity: 0.9; }
+        .health-info-body h3 { font-size: 1.6em; color: {{ health_diagnosis.color }}; margin-bottom: 8px; }
+        .health-info-body .diagnosis-text { color: #555; margin-bottom: 12px; font-size: 1.05em; }
+        .risk-tags-container { display: flex; flex-wrap: wrap; gap: 8px; }
+        .risk-tag {
+            padding: 4px 12px; border-radius: 6px; font-size: 0.85em;
+            background: #fff5f5; color: #e53e3e; border: 1px solid #feb2b2;
+            font-weight: 500;
+        }
+        /* ------------------------- */
         
         .repo-info {
             display: grid;
@@ -243,6 +278,8 @@ HTML_TEMPLATE = """
             header h1 { font-size: 1.8em; }
             main { padding: 20px; }
             .repo-info { grid-template-columns: repeat(2, 1fr); }
+            .health-dashboard { flex-direction: column; text-align: center; padding: 20px; }
+            .health-score-ring { margin-right: 0; margin-bottom: 20px; }
         }
     </style>
 </head>
@@ -253,7 +290,6 @@ HTML_TEMPLATE = """
             <p class="subtitle">GitHub仓库分析报告 | 生成时间: {{ analysis_time }}</p>
         </header>
         
-        <!-- 仓库基本信息 -->
         <div class="repo-info">
             <div class="stat-card">
                 <div class="value">⭐ {{ repo_info.stars | format_number }}</div>
@@ -280,9 +316,27 @@ HTML_TEMPLATE = """
                 <div class="label">许可证</div>
             </div>
         </div>
+
+        <div class="health-dashboard">
+            <div class="health-score-ring">
+                <div class="score-val">{{ health_diagnosis.score }}</div>
+                <div class="score-label">健康评分</div>
+            </div>
+            <div class="health-info-body">
+                <h3>项目健康诊断：{{ health_diagnosis.grade }}</h3>
+                <p class="diagnosis-text">{{ health_diagnosis.summary }}</p>
+                <div class="risk-tags-container">
+                    {% for risk in health_diagnosis.risks %}
+                    <div class="risk-tag">⚠️ {{ risk }}</div>
+                    {% endfor %}
+                    {% if not health_diagnosis.risks %}
+                    <div class="risk-tag" style="background: #f0fff4; color: #2f855a; border-color: #9ae6b4;">✅ 未发现明显运行风险</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
         
         <main>
-            <!-- 仓库描述 -->
             {% if repo_info.description %}
             <section>
                 <h2>📝 仓库描述</h2>
@@ -297,7 +351,6 @@ HTML_TEMPLATE = """
             </section>
             {% endif %}
             
-            <!-- Commit分析 -->
             {% if commit_analysis %}
             <section>
                 <h2>📈 Commit分析</h2>
@@ -400,7 +453,6 @@ HTML_TEMPLATE = """
             </section>
             {% endif %}
             
-            <!-- 贡献者分析 -->
             {% if contributor_analysis %}
             <section>
                 <h2>👥 贡献者分析</h2>
@@ -453,7 +505,6 @@ HTML_TEMPLATE = """
             </section>
             {% endif %}
             
-            <!-- Issue分析 -->
             {% if issue_analysis %}
             <section>
                 <h2>🐛 Issue分析</h2>
@@ -514,7 +565,6 @@ HTML_TEMPLATE = """
             </section>
             {% endif %}
             
-            <!-- PR分析 -->
             {% if pr_analysis %}
             <section>
                 <h2>🔀 Pull Request分析</h2>
@@ -583,7 +633,6 @@ HTML_TEMPLATE = """
             </section>
             {% endif %}
             
-            <!-- 分析总结 -->
             <section>
                 <h2>📋 分析总结</h2>
                 <div class="highlight-box">
@@ -616,80 +665,107 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
 class ReportGenerator:
-    """报告生成器"""
+    """报告生成器 (完整集成版)"""
     
     def __init__(self, output_dir: str = "output"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+
+    def _calculate_health(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        核心补充算法：基于多维数据进行健康评分
+        """
+        score = 65  # 基础分
+        risks = []
+        
+        commit_a = result.get('commit_analysis', {})
+        issue_a = result.get('issue_analysis', {})
+        pr_a = result.get('pr_analysis', {})
+        contrib_a = result.get('contributor_analysis', {})
+        
+        # 1. 活跃度
+        freq = commit_a.get('commit_frequency', {}).get('average_commits_per_day', 0)
+        if freq > 0.5: score += 10
+        elif freq < 0.1: 
+            score -= 15
+            risks.append("开发活动极不活跃")
+
+        # 2. 响应度
+        i_rate = issue_a.get('close_rate', 0)
+        if i_rate > 0.7: score += 10
+        elif i_rate < 0.2: 
+            score -= 10
+            risks.append("Issue 长期未处理堆积")
+
+        # 3. 集中度风险
+        gini = contrib_a.get('contribution_distribution', {}).get('gini_coefficient', 0)
+        if gini > 0.85:
+            score -= 20
+            risks.append("项目极度依赖单一开发者 (Bus Factor 低)")
+
+        # 4. PR 吞吐
+        p_rate = pr_a.get('merge_rate', 0)
+        if p_rate < 0.3:
+            risks.append("PR 合并通过率低，可能存在社区协作障碍")
+
+        # 结果包装
+        score = max(0, min(100, score))
+        if score >= 85: grade, color = "极佳 (Excellent)", "#2ECC71"
+        elif score >= 70: grade, color = "健康 (Healthy)", "#3498DB"
+        elif score >= 50: grade, color = "一般 (Fair)", "#F39C12"
+        else: grade, color = "预警 (At Risk)", "#E74C3C"
+
+        return {
+            "score": int(score),
+            "grade": grade,
+            "color": color,
+            "risks": risks,
+            "summary": f"当前仓库健康度积分为 {int(score)}。分析显示该项目{'处于活跃且健康的协作状态' if score >= 70 else '可能存在维护力度不足或社区化程度低的问题'}。"
+        }
     
     def generate_html_report(self, analysis_result: Dict[str, Any],
                              chart_paths: List[str] = None) -> str:
-        """
-        生成HTML报告
+        """生成HTML报告"""
+        console.print("[cyan]正在生成完整HTML报告...[/cyan]")
         
-        Args:
-            analysis_result: 分析结果
-            chart_paths: 图表文件路径列表
-            
-        Returns:
-            生成的HTML文件路径
-        """
-        console.print("[cyan]正在生成HTML报告...[/cyan]")
-        
-        # 处理图表路径
+        # 处理图表路径（完全保留原逻辑）
         charts = {}
         if chart_paths:
             for path in chart_paths:
-                if not path:
-                    continue
+                if not path: continue
                 filename = os.path.basename(path)
-                # 转换为相对路径
                 rel_path = os.path.basename(path)
                 
-                if 'hourly' in filename:
-                    charts['hourly'] = rel_path
-                elif 'weekday' in filename:
-                    charts['weekday'] = rel_path
-                elif 'monthly_commits' in filename:
-                    charts['monthly'] = rel_path
-                elif 'top_authors' in filename:
-                    charts['authors'] = rel_path
-                elif 'contribution_dist' in filename:
-                    charts['contribution_dist'] = rel_path
-                elif 'issue_status' in filename:
-                    charts['issue_status'] = rel_path
-                elif 'issue_labels' in filename:
-                    charts['issue_labels'] = rel_path
-                elif 'pr_status' in filename:
-                    charts['pr_status'] = rel_path
-                elif 'pr_size' in filename:
-                    charts['pr_size'] = rel_path
-                elif 'heatmap' in filename:
-                    charts['heatmap'] = rel_path
+                if 'hourly' in filename: charts['hourly'] = rel_path
+                elif 'weekday' in filename: charts['weekday'] = rel_path
+                elif 'monthly_commits' in filename: charts['monthly'] = rel_path
+                elif 'top_authors' in filename: charts['authors'] = rel_path
+                elif 'contribution_dist' in filename: charts['contribution_dist'] = rel_path
+                elif 'issue_status' in filename: charts['issue_status'] = rel_path
+                elif 'issue_labels' in filename: charts['issue_labels'] = rel_path
+                elif 'pr_status' in filename: charts['pr_status'] = rel_path
+                elif 'pr_size' in filename: charts['pr_size'] = rel_path
+                elif 'heatmap' in filename: charts['heatmap'] = rel_path
         
-        # 自定义过滤器
+        # 计算健康诊断
+        health = self._calculate_health(analysis_result)
+        
+        # 自定义过滤器（完全保留原逻辑）
         def format_number(value):
-            if value is None:
-                return 'N/A'
+            if value is None: return 'N/A'
             if isinstance(value, (int, float)):
-                if value >= 1000000:
-                    return f"{value/1000000:.1f}M"
-                elif value >= 1000:
-                    return f"{value/1000:.1f}K"
+                if value >= 1000000: return f"{value/1000000:.1f}M"
+                elif value >= 1000: return f"{value/1000:.1f}K"
                 return str(int(value))
             return str(value)
         
-        # 创建模板
         template = Template(HTML_TEMPLATE)
         template.globals['format_number'] = format_number
         
-        # 准备模板数据
         repo_info = analysis_result.get('repo_info', {})
         repo_name = repo_info.get('full_name', 'Unknown Repository')
         
-        # 渲染HTML
         html_content = template.render(
             repo_name=repo_name,
             analysis_time=analysis_result.get('analysis_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
@@ -699,131 +775,55 @@ class ReportGenerator:
             issue_analysis=analysis_result.get('issue_analysis'),
             pr_analysis=analysis_result.get('pr_analysis'),
             analysis_params=analysis_result.get('analysis_params', {}),
-            charts=charts
+            charts=charts,
+            health_diagnosis=health  # 注入健康数据
         )
         
-        # 保存文件
         safe_repo_name = repo_name.replace('/', '_')
-        filename = f"{safe_repo_name}_report.html"
-        filepath = os.path.join(self.output_dir, filename)
+        filepath = os.path.join(self.output_dir, f"{safe_repo_name}_report.html")
         
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        console.print(f"[green]✓ HTML报告已生成: {filepath}[/green]")
+        console.print(f"[green]✓ HTML报告已生成 (已集成健康诊断): {filepath}[/green]")
         return filepath
     
     def generate_json_report(self, analysis_result: Dict[str, Any]) -> str:
-        """
-        生成JSON报告
-        
-        Args:
-            analysis_result: 分析结果
-            
-        Returns:
-            生成的JSON文件路径
-        """
+        """生成JSON报告"""
         console.print("[cyan]正在生成JSON报告...[/cyan]")
-        
-        # 创建一个用于JSON的副本，移除raw_data以减小文件大小
         result_copy = self._clean_for_json(analysis_result)
+        # JSON 报告也加入健康评分数据
+        result_copy['health_diagnosis'] = self._calculate_health(analysis_result)
         
         repo_name = analysis_result.get('repo_info', {}).get('full_name', 'unknown')
         safe_repo_name = repo_name.replace('/', '_')
-        filename = f"{safe_repo_name}_report.json"
-        filepath = os.path.join(self.output_dir, filename)
+        filepath = os.path.join(self.output_dir, f"{safe_repo_name}_report.json")
         
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(result_copy, f, ensure_ascii=False, indent=2, default=str)
         
-        console.print(f"[green]✓ JSON报告已生成: {filepath}[/green]")
         return filepath
     
     def _clean_for_json(self, data: Any) -> Any:
-        """清理数据以便JSON序列化"""
+        """清理数据以便JSON序列化 (保留原逻辑)"""
         if isinstance(data, dict):
-            result = {}
-            for key, value in data.items():
-                # 跳过raw_data字段以减小文件大小
-                if key == 'raw_data':
-                    continue
-                result[key] = self._clean_for_json(value)
-            return result
+            return {k: self._clean_for_json(v) for k, v in data.items() if k != 'raw_data'}
         elif isinstance(data, list):
             return [self._clean_for_json(item) for item in data]
         elif isinstance(data, datetime):
             return data.strftime('%Y-%m-%d %H:%M:%S')
-        else:
-            return data
-    
+        return data
+
     def generate_summary(self, analysis_result: Dict[str, Any]) -> str:
-        """
-        生成文本摘要
-        
-        Args:
-            analysis_result: 分析结果
-            
-        Returns:
-            摘要文本
-        """
+        """生成带诊断信息的文本摘要"""
         repo_info = analysis_result.get('repo_info', {})
-        commit_analysis = analysis_result.get('commit_analysis', {})
-        contributor_analysis = analysis_result.get('contributor_analysis', {})
-        issue_analysis = analysis_result.get('issue_analysis', {})
-        pr_analysis = analysis_result.get('pr_analysis', {})
+        health = self._calculate_health(analysis_result)
         
-        summary_lines = [
-            "=" * 60,
-            f"📊 GitHub仓库分析报告摘要",
-            f"仓库: {repo_info.get('full_name', 'N/A')}",
-            "=" * 60,
-            "",
-            "📌 仓库概况",
-            f"  ⭐ Stars: {repo_info.get('stars', 'N/A')}",
-            f"  🍴 Forks: {repo_info.get('forks', 'N/A')}",
-            f"  💻 主要语言: {repo_info.get('language', 'N/A')}",
-            f"  📜 许可证: {repo_info.get('license', 'N/A')}",
-            "",
-        ]
-        
-        if commit_analysis:
-            summary_lines.extend([
-                "📈 Commit统计",
-                f"  总Commit数: {commit_analysis.get('total_commits', 'N/A')}",
-                f"  活跃贡献者: {commit_analysis.get('author_stats', {}).get('total_authors', 'N/A')}",
-                f"  峰值提交时间: {commit_analysis.get('hourly_distribution', {}).get('peak_hour', 'N/A')}:00",
-                f"  最活跃日: {commit_analysis.get('weekday_distribution', {}).get('peak_day', 'N/A')}",
-                "",
-            ])
-        
-        if contributor_analysis:
-            contrib_dist = contributor_analysis.get('contribution_distribution', {})
-            summary_lines.extend([
-                "👥 贡献者分析",
-                f"  总贡献者: {contributor_analysis.get('total_contributors', 'N/A')}",
-                f"  基尼系数: {contrib_dist.get('gini_coefficient', 'N/A'):.3f}" if isinstance(contrib_dist.get('gini_coefficient'), (int, float)) else f"  基尼系数: N/A",
-                f"  前20%贡献占比: {contrib_dist.get('pareto_ratio', 0) * 100:.1f}%" if isinstance(contrib_dist.get('pareto_ratio'), (int, float)) else f"  前20%贡献占比: N/A",
-                "",
-            ])
-        
-        if issue_analysis:
-            summary_lines.extend([
-                "🐛 Issue统计",
-                f"  总Issue数: {issue_analysis.get('total_issues', 'N/A')}",
-                f"  Open/Closed: {issue_analysis.get('open_issues', 'N/A')}/{issue_analysis.get('closed_issues', 'N/A')}",
-                f"  关闭率: {issue_analysis.get('close_rate', 0) * 100:.1f}%" if isinstance(issue_analysis.get('close_rate'), (int, float)) else f"  关闭率: N/A",
-                "",
-            ])
-        
-        if pr_analysis:
-            summary_lines.extend([
-                "🔀 PR统计",
-                f"  总PR数: {pr_analysis.get('total_prs', 'N/A')}",
-                f"  已合并: {pr_analysis.get('merged_prs', 'N/A')}",
-                f"  合并率: {pr_analysis.get('merge_rate', 0) * 100:.1f}%" if isinstance(pr_analysis.get('merge_rate'), (int, float)) else f"  合并率: N/A",
-                "",
-            ])
-        
-        summary_lines.append("=" * 60)
-        
-        return "\n".join(summary_lines)
+        summary = f"============================================================\n"
+        summary += f"📊 GitHub仓库分析报告摘要\n"
+        summary += f"仓库: {repo_info.get('full_name', 'N/A')}\n"
+        summary += f"健康评价: {health['grade']} (得分: {health['score']})\n"
+        if health['risks']:
+            summary += f"风险点: {', '.join(health['risks'])}\n"
+        summary += f"============================================================\n"
+        return summary
