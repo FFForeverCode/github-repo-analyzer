@@ -238,7 +238,6 @@ result = commit_analyzer.analyze_commit_patterns(
 
 print(f"总 Commit 数: {result['total_commits']}")
 print(f"峰值提交时间: {result['hourly_distribution']['peak_hour']}:00")
-```
 
 ## ⚠️ 注意事项
 
